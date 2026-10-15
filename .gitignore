@@ -1,0 +1,24 @@
+# outputs and recordings: meeting audio and transcripts are private
+out/
+*.wav
+*.m4a
+*.mp3
+*.mp4
+*.aac
+*.flac
+*.ogg
+*.webm
+
+# local model endpoints and keys
+llm.toml
+.env
+.env.*
+!.env.example
+
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# local agent state
+.claude/

@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>회의록 만들기</title>
+<link rel="icon" href="data:,">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --text: #1d2129; --muted: #6b7280; --faint: #9ca3af; --line: #e4e7eb;
+    --accent: #2f6fed; --accent-text: #fff; --soft: #eef2f7;
+    --ok: #16a34a; --err: #dc2626; --warn: #d97706; --info: #2563eb;
+    --sp0: #2563eb; --sp1: #db2777; --sp2: #059669; --sp3: #d97706; --sp4: #7c3aed; --sp5: #0891b2; --sp6: #dc2626; --sp7: #4b5563;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121418; --panel: #1b1e23; --text: #e6e8eb; --muted: #9aa1ab; --faint: #6b7280; --line: #2b3036;
+      --accent: #5b8cff; --accent-text: #0b0d10; --soft: #23272e;
+      --ok: #4ade80; --err: #f87171; --warn: #fbbf24; --info: #60a5fa;
+      --sp0: #60a5fa; --sp1: #f472b6; --sp2: #34d399; --sp3: #fbbf24; --sp4: #a78bfa; --sp5: #22d3ee; --sp6: #f87171; --sp7: #9ca3af;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14.5px/1.6 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", sans-serif; }
+  button { font: inherit; cursor: pointer; }
+  input, select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; width: 100%; }
+  textarea { resize: vertical; min-height: 56px; }
+  .btn { border: 0; border-radius: 6px; padding: 8px 14px; background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); font-weight: 500; padding: 6px 12px; }
+  .btn.small { padding: 4px 10px; font-size: 13px; }
+  .muted { color: var(--muted); } .faint { color: var(--faint); }
+  .hint { font-size: 12px; color: var(--muted); }
+
+  /* shell */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px;
+    max-width: 1440px; margin: 0 auto; }
+  .topbar h1 { margin: 0; font-size: 18px; }
+  .topbar p { margin: 0; font-size: 12px; color: var(--muted); }
+  .shell { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; padding: 0 24px 40px;
+    max-width: 1440px; margin: 0 auto; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .jobs { padding: 8px; position: sticky; top: 12px; }
+  .jobs h2 { font-size: 12px; color: var(--muted); margin: 4px 8px 6px; font-weight: 600; }
+  .jobs ul { list-style: none; margin: 0; padding: 0; }
+  .jobs li { padding: 8px; border-radius: 6px; cursor: pointer; font-size: 13px; display: grid; gap: 2px; }
+  .jobs li:hover, .jobs li.active { background: var(--soft); }
+  .jobs .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .jobs .meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+  .badge { font-size: 11px; padding: 0 7px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; line-height: 18px; }
+  .s-queued { color: var(--muted); } .s-running { color: var(--warn); } .s-done { color: var(--ok); } .s-error { color: var(--err); }
+  @media (max-width: 1000px) {
+    .shell { grid-template-columns: 1fr; padding: 0 16px 32px; }
+    .topbar { padding: 12px 16px; }
+    .jobs { position: static; }
+    .jobs ul { display: flex; gap: 6px; overflow-x: auto; }
+    .jobs li { min-width: 160px; }
+  }
+
+  /* job header */
+  .job { padding: 16px 20px; }
+  .job-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .job-head h2 { margin: 0; font-size: 17px; word-break: break-all; }
+  .job-head .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .steps { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .step { font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--soft); color: var(--muted); }
+  .step.done { color: var(--ok); }
+  .step.now { color: var(--accent-text); background: var(--accent); }
+  .error-box { margin-top: 10px; padding: 10px 12px; border-radius: 8px; color: var(--err);
+    background: color-mix(in srgb, var(--err) 10%, transparent); white-space: pre-wrap; font-size: 13px; }
+  details.log { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  details.log pre { margin: 6px 0 0; white-space: pre-wrap; }
+
+  /* player */
+  .player { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .player audio { flex: 1; min-width: 240px; height: 36px; }
+  .player label { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .player input[type=checkbox] { width: auto; }
+
+  /* tabs */
+  .tabs { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+  .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; color: var(--muted); }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .tabs .spacer { flex: 1; }
+  .tabs a { align-self: center; font-size: 12px; color: var(--accent); margin-left: 10px; text-decoration: none; }
+
+  /* conversation view */
+  .conv { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; padding: 16px 20px 24px; }
+  @media (max-width: 1200px) { .conv { grid-template-columns: 1fr; } .side { order: -1; } }
+  .notice { padding: 10px 12px; border-radius: 8px; background: var(--soft); font-size: 13px; color: var(--muted);
+    display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 12px; }
+  .notice.err { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+
+  .timeline { margin-bottom: 14px; }
+  .timeline .row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; height: 18px; }
+  .timeline .who { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+  .lanes { position: relative; cursor: pointer; }
+  .lane { position: relative; height: 12px; border-radius: 3px; background: var(--soft); }
+  .lane span { position: absolute; top: 0; bottom: 0; border-radius: 2px; min-width: 2px; opacity: .85; }
+  .tl-grid { position: relative; height: 100%; }
+  .tl-overlay { position: absolute; inset: 0; pointer-events: none; }
+  .tl-topic { position: absolute; top: -4px; bottom: -4px; border-left: 1px dashed var(--faint); }
+  .tl-topic b { position: absolute; top: -16px; left: 2px; font-size: 10px; color: var(--muted); font-weight: 600; }
+  .tl-head { position: absolute; top: -6px; bottom: -6px; width: 2px; background: var(--err); display: none; }
+  .tl-axis { display: grid; grid-template-columns: 96px 1fr; gap: 8px; font-size: 10px; color: var(--faint); }
+  .tl-axis div:last-child { display: flex; justify-content: space-between; }
+  .tl-lanes-wrap { position: relative; padding-top: 14px; }
+
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 4px 0 12px; }
+  .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 99px; padding: 3px 10px; font-size: 12px;
+    display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+  .chip.off { opacity: .4; }
+  .chip.on-key { border-color: var(--accent); color: var(--accent); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  .filters input { width: 180px; padding: 4px 10px; font-size: 13px; border-radius: 99px; }
+
+  .topic { margin-bottom: 18px; }
+  .topic-head { position: sticky; top: 57px; z-index: 2; background: var(--panel); padding: 8px 0 6px; border-bottom: 1px solid var(--line); }
+  .topic-head .t { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .topic-head .num { font-size: 12px; font-weight: 700; color: var(--accent); }
+  .topic-head h3 { margin: 0; font-size: 15px; }
+  .topic-head .range { font-size: 12px; color: var(--muted); }
+  .topic-head p { margin: 2px 0 6px; font-size: 13px; color: var(--muted); }
+  .share { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--soft); }
+
+  .turn { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 10px; padding: 6px 8px; border-radius: 8px; margin: 2px -8px; }
+  .turn.cont { padding-top: 0; }
+  .turn.cont .avatar { visibility: hidden; height: 0; }
+  .turn.cont .who-line { display: none; }
+  .turn.playing { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .turn.flash { animation: flash 1.6s ease-out; }
+  @keyframes flash { 0% { background: color-mix(in srgb, var(--warn) 30%, transparent); } 100% { background: transparent; } }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; color: #fff; display: grid; place-items: center; font-size: 13px; font-weight: 700; margin-top: 2px; }
+  .who-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+  .who-line b { font-weight: 600; }
+  .who-line .lbl { font-size: 11px; color: var(--faint); }
+  .ts { border: 0; background: none; padding: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .ts:hover { color: var(--accent); text-decoration: underline; }
+  .text { margin: 0; word-break: break-word; }
+  .text-row { display: flex; gap: 8px; align-items: baseline; }
+  .text-row .ts { flex: none; }
+  .turn:not(.cont) .text-row .ts { display: none; }
+  .kt { display: inline-flex; gap: 4px; align-items: center; font-size: 11px; padding: 0 7px; border-radius: 4px; margin: 3px 0 0;
+    border: 1px solid currentColor; line-height: 18px; }
+  .kt-decision { color: var(--ok); } .kt-action { color: var(--info); } .kt-question { color: var(--warn); } .kt-issue { color: var(--err); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+  .seg button { border: 0; background: var(--panel); color: var(--muted); font-size: 12px; padding: 3px 10px; }
+  .seg button.on { background: var(--accent); color: var(--accent-text); }
+  .fix { border: 0; background: none; padding: 0 4px; font-size: 11px; color: var(--accent); border-radius: 4px; }
+  .fix:hover { text-decoration: underline; }
+  .diff { margin: 4px 0 2px; padding: 6px 10px; border-radius: 6px; background: var(--soft); font-size: 13px; line-height: 1.7; }
+  .diff del { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); text-decoration: line-through; }
+  .diff ins { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); text-decoration: none; }
+  .diff .rej { margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin-top: 14px; font-size: 13px; color: var(--text); }
+  .check input { width: auto; margin-top: 4px; }
+  mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: 2px; }
+  .gap { text-align: center; font-size: 11px; color: var(--faint); margin: 6px 0; }
+
+  /* sidebar */
+  .side { display: grid; gap: 14px; align-content: start; position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow: auto; }
+  @media (max-width: 1200px) { .side { position: static; max-height: none; } }
+  .side h4 { margin: 0 0 8px; font-size: 13px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .sp { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .sp:first-of-type { border-top: 0; padding-top: 0; }
+  .sp-head { display: flex; gap: 8px; align-items: center; }
+  .sp-head .nm { font-weight: 600; }
+  .sp-head .role { font-size: 11px; color: var(--muted); }
+  .sp-head .ok { font-size: 11px; color: var(--ok); }
+  .stat { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .stat .bar { flex: 1; height: 4px; background: var(--soft); border-radius: 2px; overflow: hidden; }
+  .stat .bar i { display: block; height: 100%; }
+  .cand { display: grid; grid-template-columns: 70px 1fr 38px; gap: 6px; align-items: center; font-size: 12px; }
+  .cand .bar { height: 6px; background: var(--soft); border-radius: 3px; overflow: hidden; }
+  .cand .bar i { display: block; height: 100%; }
+  .cand .p { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .cand .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ev { font-size: 12px; color: var(--muted); margin: 0; padding-left: 14px; }
+  .ev li { cursor: pointer; } .ev li:hover { color: var(--accent); }
+  .confirm { display: flex; gap: 6px; }
+  .confirm .btn { flex: none; white-space: nowrap; }
+  details.ev-wrap summary { font-size: 11px; color: var(--faint); cursor: pointer; margin: -2px 0 0 76px; }
+  .reanalyze { display: flex; gap: 6px; margin-bottom: 10px; }
+  .reanalyze input { padding: 4px 8px; font-size: 13px; }
+  .reanalyze .btn { flex: none; white-space: nowrap; }
+  .who-tag { font-weight: 600; }
+  .confirm input { padding: 4px 8px; font-size: 13px; }
+  .toc { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .toc li { display: flex; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+  .toc li:hover { background: var(--soft); }
+  .toc .num { color: var(--accent); font-weight: 700; font-size: 12px; min-width: 14px; }
+  .toc .range { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+  .keys { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 4px; }
+  .keys li { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+  .keys li:hover .note { color: var(--accent); }
+
+  /* minutes view */
+  .minutes { padding: 8px 20px 24px; }
+  .doc { overflow-x: auto; }
+  .doc table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 8px 0; }
+  .doc th, .doc td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  .doc th { background: var(--soft); }
+  .doc h1 { font-size: 19px; } .doc h2 { font-size: 16px; margin-top: 22px; } .doc h3 { font-size: 14.5px; }
+  .doc pre.raw { padding: 12px; white-space: pre-wrap; background: var(--soft); border-radius: 6px; }
+  .regen { display: grid; grid-template-columns: 140px 1fr auto; gap: 8px; align-items: end; margin-top: 20px;
+    padding-top: 16px; border-top: 1px solid var(--line); }
+  .regen label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  @media (max-width: 640px) { .regen { grid-template-columns: 1fr; } }
+
+  .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
+
+  /* upload dialog */
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); padding: 0;
+    width: min(460px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  dialog form { padding: 20px; }
+  dialog h2 { margin: 0 0 8px; font-size: 16px; }
+  dialog label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  .drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 18px 12px; text-align: center; color: var(--muted);
+    cursor: pointer; font-size: 13px; }
+  .drop.over, .drop:hover { border-color: var(--accent); color: var(--text); }
+  .drop strong { color: var(--text); word-break: break-all; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div>
+    <h1>회의록 만들기</h1>
+    <p>음성은 이 PC에서만 처리하고, 분석·회의록 단계에서 녹취록 텍스트만 LLM에 보냅니다.</p>
+  </div>
+  <button class="btn" id="new-btn">+ 새 회의</button>
+</div>
+<div class="shell">
+  <nav class="panel jobs"><h2>작업 목록</h2><ul id="jobs"></ul></nav>
+  <section class="panel" id="detail">
+    <div class="empty">녹음 파일을 올리면 대화 흐름과 회의록이 여기 나옵니다.<br>
+      7분 회의 기준 약 8분 걸립니다 (화자분리가 대부분).<br><br>
+      <button class="btn" onclick="openUpload()">+ 새 회의</button></div>
+  </section>
+</div>
+
+<dialog id="upload">
+  <form id="form" method="dialog">
+    <h2>새 회의</h2>
+    <div class="drop" id="drop">
+      <input type="file" id="file" accept="audio/*,video/*" hidden>
+      <span id="drop-text">녹음 파일을 끌어다 놓거나 클릭해서 선택</span>
+    </div>
+    <label for="speakers">화자 수</label>
+    <input id="speakers" type="number" min="1" max="20" placeholder="모르면 비워두기">
+    <div class="hint">알면 꼭 넣어주세요. 화자분리 정확도가 가장 크게 오릅니다.</div>
+    <label for="names">참석자 이름 후보</label>
+    <input id="names" placeholder="김팀장, 이선임, 박매니저">
+    <div class="hint">화자별 이름 확률을 이 후보 안에서 계산합니다.</div>
+    <label for="vocab">자주 나오는 용어</label>
+    <input id="vocab" placeholder="QA, 결제 모듈, 스프린트">
+    <label for="context">회의 배경</label>
+    <textarea id="context" placeholder="11월 출시 일정 점검 회의"></textarea>
+    <label for="llm">회의록 모델</label>
+    <select id="llm"></select>
+    <div class="hint">화자·담당자 매핑은 추론형 대형 모델(Claude, GPT-5 급)이 가장 정확합니다.</div>
+    <label class="check"><input type="checkbox" id="correct" checked>
+      <span>녹취록을 맥락 기반으로 먼저 보정하고, 그 보정본으로 분석·회의록 작성<br>
+      <span class="hint">이름 후보·용어·회의 배경을 넣으면 고유명사 보정이 정확해집니다.</span></span></label>
+    <div class="dialog-actions">
+      <button class="btn ghost" type="button" onclick="upload.close()">취소</button>
+      <button class="btn" id="submit" type="submit" disabled>시작</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (s, root = document) => root.querySelector(s);
+const STATUS = { queued: "대기", running: "진행 중", done: "완료", error: "실패" };
+const KT = { decision: "결정", action: "할 일", question: "질문", issue: "이슈" };
+const UNKNOWN = "미상";
+const PALETTE = 8;
+
+const S = {
+  cfg: null, jobs: [], job: null,
+  data: {},                     // job id -> {transcript, analysis, minutes, seen}
+  view: "conv",
+  textMode: "corrected",        // corrected | original
+  openDiffs: new Set(),
+  filter: { hidden: new Set(), q: "", keyOnly: false },
+  follow: true,
+  pollTimer: null, tickTimer: null,
+};
+
+// ---------- helpers ----------
+function el(tag, attrs = {}, ...children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "style") n.style.cssText = v;
+    else if (k.startsWith("on")) n[k] = v;
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) n.append(c);
+  return n;
+}
+const pad = (n) => String(n).padStart(2, "0");
+function ts(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+function dur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}초`;
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return s ? `${m}분 ${s}초` : `${m}분`;
+}
+const pct = (p) => `${Math.round(p * 100)}%`;
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail; } catch {}
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return r;
+}
+// Text with search matches wrapped in <mark>, built from text nodes only.
+function highlighted(text, q) {
+  if (!q) return [text];
+  const out = [], lower = text.toLowerCase(), needle = q.toLowerCase();
+  let i = 0, j;
+  while ((j = lower.indexOf(needle, i)) >= 0) {
+    if (j > i) out.push(text.slice(i, j));
+    out.push(el("mark", {}, text.slice(j, j + needle.length)));
+    i = j + needle.length;
+  }
+  out.push(text.slice(i));
+  return out;
+}
+
+// ---------- speakers ----------
+function labels() { return S.data[S.job.id]?.labels || []; }
+function color(label) { const i = labels().indexOf(label); return `var(--sp${(i < 0 ? 7 : i) % PALETTE})`; }
+function prediction(label) { return S.data[S.job.id]?.analysis?.speakers.find((s) => s.label === label); }
+function speakerInfo(label) {
+  const confirmed = S.job.speaker_map?.[label];
+  const pred = prediction(label);
+  const top = pred?.candidates?.[0];
+  if (confirmed) return { name: confirmed, kind: "confirmed", role: pred?.role, note: "확정" };
+  if (top && top.name !== UNKNOWN && top.prob >= 0.5) {
+    return { name: top.name, kind: "guess", role: pred?.role, note: `추정 ${pct(top.prob)}` };
+  }
+  return { name: label, kind: "label", role: pred?.role, note: "" };
+}
+function initial(label) {
+  const info = speakerInfo(label);
+  return info.kind === "label" ? String(labels().indexOf(label) + 1) : info.name.slice(0, 1);
+}
+
+// LLM summaries mention raw labels (SPEAKER_02); show them as the current display names.
+function richText(text) {
+  const parts = String(text || "").split(/(SPEAKER_(?:\d+|\?\?))/g);
+  return parts.map((p, i) => i % 2 && labels().includes(p)
+    ? el("span", { class: "who-tag", style: `color:${color(p)}`, title: p }, speakerInfo(p).name) : p);
+}
+
+// ---------- upload ----------
+const upload = $("#upload"), fileInput = $("#file"), drop = $("#drop");
+function openUpload() { upload.showModal(); }
+$("#new-btn").onclick = openUpload;
+drop.onclick = () => fileInput.click();
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+  if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; onFile(); }
+};
+fileInput.onchange = onFile;
+function onFile() {
+  const f = fileInput.files[0], t = $("#drop-text");
+  t.replaceChildren(...(f ? [el("strong", {}, f.name), ` (${(f.size / 1048576).toFixed(1)} MB)`] : ["녹음 파일을 끌어다 놓거나 클릭해서 선택"]));
+  $("#submit").disabled = !f;
+}
+$("#form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = fileInput.files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append("file", f);
+  for (const k of ["speakers", "names", "vocab", "context", "llm"]) {
+    const v = $("#" + k).value.trim();
+    if (v) fd.append(k, v);
+  }
+  fd.append("correct", $("#correct").checked ? "true" : "false");
+  const btn = $("#submit");
+  btn.disabled = true; btn.textContent = "업로드 중...";
+  try {
+    const job = await (await api("/api/jobs", { method: "POST", body: fd })).json();
+    upload.close();
+    fileInput.value = ""; onFile();
+    await refreshJobs();
+    select(job.id);
+  } catch (err) {
+    alert("업로드 실패: " + err.message);
+    btn.disabled = false;
+  } finally {
+    btn.textContent = "시작";
+  }
+};
+
+// ---------- job list ----------
+async function refreshJobs() {
+  S.jobs = await (await api("/api/jobs")).json();
+  const ul = $("#jobs");
+  ul.replaceChildren(...(S.jobs.length ? S.jobs.map((j) => el("li", {
+    class: j.id === S.job?.id ? "active" : "", onclick: () => select(j.id), title: j.filename,
+  },
+    el("span", { class: "name" }, j.filename),
+    el("span", { class: "meta" },
+      new Date(j.created_at * 1000).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+      el("span", { class: `badge s-${j.status}` }, STATUS[j.status])))) : [el("li", { class: "hint" }, "아직 없음")]));
+  return S.jobs;
+}
+
+// ---------- job detail ----------
+function select(id) {
+  clearTimeout(S.pollTimer);
+  S.job = null; S.view = "conv"; S.textMode = "corrected"; S.openDiffs = new Set();
+  S.filter = { hidden: new Set(), q: "", keyOnly: false };
+  buildDetailShell();
+  S.pendingId = id;
+  poll(true);
+  refreshJobs();
+}
+
+function buildDetailShell() {
+  $("#detail").replaceChildren(
+    el("div", { class: "job", id: "job-head" }),
+    el("div", { id: "player-slot" }),
+    el("div", { class: "tabs", id: "tabs" }),
+    el("div", { id: "view" }),
+  );
+}
+
+async function poll(first = false) {
+  const id = S.pendingId;
+  let job;
+  try { job = await (await api(`/api/jobs/${id}`)).json(); } catch { return; }
+  if (id !== S.pendingId) return;
+  const prev = S.job;
+  S.job = job;
+  const changed = await loadData(job, prev);
+  renderHead();
+  if (first || changed || !prev) { renderPlayer(first); renderTabs(); renderView(); }
+  const busy = job.status === "queued" || job.status === "running" || job.analysis_status === "running" || job.correction_status === "running";
+  if (busy) S.pollTimer = setTimeout(() => poll(), 2000);
+  if (prev && ["status", "analysis_status", "correction_status"].some((k) => prev[k] !== job[k])) refreshJobs();
+}
+
+// Fetch outputs that appeared or were regenerated since the last poll. Returns true if any changed.
+async function loadData(job, prev) {
+  const d = S.data[job.id] || (S.data[job.id] = {});
+  let changed = false;
+  const fin = (p, key) => !p || p[key] !== job[key];
+  if (job.has_transcript && !d.transcript) {
+    d.transcript = await (await api(`/api/jobs/${job.id}/files/transcript.json`)).json();
+    d.labels = [...new Set(d.transcript.turns.map((t) => t.speaker))].sort();
+    changed = true;
+  }
+  if (job.has_correction && (!d.correction || (fin(prev, "correction_status") && job.correction_status === "done"))) {
+    d.correction = await (await api(`/api/jobs/${job.id}/files/transcript_corrected.json`)).json();
+    d.changes = Object.fromEntries(d.correction.changes.map((c) => [c.turn, c]));
+    changed = true;
+  }
+  if (job.has_analysis && (!d.analysis || (fin(prev, "analysis_status") && job.analysis_status === "done"))) {
+    d.analysis = await (await api(`/api/jobs/${job.id}/files/analysis.json`)).json();
+    changed = true;
+  }
+  if (job.has_minutes && (!d.minutes || (fin(prev, "status") && job.status === "done"))) {
+    d.minutes = await (await api(`/api/jobs/${job.id}/files/minutes.md`)).text();
+    changed = true;
+  }
+  if (prev && ["analysis_status", "correction_status", "status"].some((k) => prev[k] !== job[k])) changed = true;
+  if (prev && JSON.stringify(prev.speaker_map) !== JSON.stringify(job.speaker_map)) changed = true;
+  return changed;
+}
+
+const STEPS = [
+  ["음성 인식", "ASR done"], ["단어 정렬", "alignment done"], ["화자 분리", "diarization done"],
+  ["녹취록 보정", "녹취록 보정 완료"], ["회의록", "회의록 완료"], ["대화 분석", "대화 분석 완료"],
+];
+function renderHead() {
+  const job = S.job, head = $("#job-head");
+  const logText = job.log.join("\n");
+  const elapsed = el("span");
+  clearInterval(S.tickTimer);
+  const tick = () => { elapsed.textContent = dur((job.finished_at || Date.now() / 1000) - job.created_at); };
+  tick();
+  if (!job.finished_at) S.tickTimer = setInterval(tick, 1000);
+  let nowSet = false;
+  // Output files settle the finished steps (also for runs made before progress logs existed).
+  const byFiles = [job.has_transcript, job.has_transcript, job.has_transcript,
+    job.has_correction && job.correction_status !== "running",
+    job.has_minutes && job.status !== "running" && job.status !== "queued",
+    job.has_analysis && job.analysis_status !== "running"];
+  const running = { "녹취록 보정": job.correction_status === "running", "대화 분석": job.analysis_status === "running" };
+  const steps = STEPS.map(([name, mark], i) => {
+    if (name === "녹취록 보정" && !job.correct && !job.has_correction && job.correction_status === "none") return null;
+    const done = byFiles[i] || logText.includes(mark);
+    const now = !done && !nowSet && (job.status === "running" || running[name]);
+    if (now) nowSet = true;
+    return el("span", { class: `step ${done ? "done" : now ? "now" : ""}` }, (done ? "✓ " : "") + name);
+  }).filter(Boolean);
+  const timed = !job.finished_at || job.finished_at - job.created_at >= 1;
+  head.replaceChildren(...[
+    el("div", { class: "job-head" },
+      el("div", {},
+        el("h2", {}, job.filename),
+        el("div", { class: "sub" }, job.stage, timed && " · ", timed && elapsed,
+          job.speakers.length ? ` · 화자 ${job.speakers.length}명` : "")),
+      el("span", { class: `badge s-${job.status}` }, STATUS[job.status])),
+    (job.log.length > 0 || job.status === "running") && el("div", { class: "steps" }, steps),
+    job.error && el("div", { class: "error-box" }, job.error),
+    job.log.length > 0 && el("details", { class: "log" }, el("summary", {}, "진행 로그"), el("pre", {}, logText)),
+  ].filter(Boolean));
+}
+
+function renderPlayer(force) {
+  const slot = $("#player-slot");
+  if (!S.job.has_audio || !S.data[S.job.id]?.transcript) { slot.replaceChildren(); return; }
+  if (!force && $("audio", slot)) return;  // keep playback going across re-renders
+  const audio = el("audio", { controls: true, preload: "metadata", src: `/api/jobs/${S.job.id}/audio` });
+  audio.ontimeupdate = () => onTime(audio.currentTime);
+  const follow = el("input", { type: "checkbox", checked: S.follow, onchange: (e) => { S.follow = e.target.checked; } });
+  slot.replaceChildren(el("div", { class: "player" }, audio, el("label", {}, follow, "재생 위치 따라가기")));
+}
+function audioEl() { return $("#player-slot audio"); }
+function seek(sec) {
+  const a = audioEl();
+  if (!a) return;
+  a.currentTime = Math.max(0, sec - 0.2);
+  a.play().catch(() => {});
+}
+let playingIdx = -1;
+function onTime(t) {
+  const turns = S.data[S.job.id]?.transcript?.turns || [];
+  const head = $("#tl-head");
+  const total = turns.length ? turns[turns.length - 1].end : 0;
+  if (head && total) { head.style.display = "block"; head.style.left = `${Math.min(100, t / total * 100)}%`; }
+  const idx = turns.findIndex((x) => t >= x.start - 0.2 && t <= x.end + 0.3);
+  if (idx === playingIdx) return;
+  document.querySelectorAll(".turn.playing").forEach((n) => n.classList.remove("playing"));
+  playingIdx = idx;
+  if (idx < 0) return;
+  const node = document.getElementById(`turn-${idx}`);
+  if (node) {
+    node.classList.add("playing");
+    if (S.follow) node.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+function jumpTo(i, play = false) {
+  const node = document.getElementById(`turn-${i}`);
+  if (S.view !== "conv") { S.view = "conv"; renderTabs(); renderView(); return jumpTo(i, play); }
+  if (!node) return;
+  node.scrollIntoView({ block: "center", behavior: "smooth" });
+  node.classList.remove("flash"); void node.offsetWidth; node.classList.add("flash");
+  if (play) seek(S.data[S.job.id].transcript.turns[i].start);
+}
+
+function renderTabs() {
+  const job = S.job, tabs = $("#tabs");
+  if (!job.has_transcript && !job.has_minutes) { tabs.replaceChildren(); tabs.style.display = "none"; return; }
+  tabs.style.display = "";
+  const tab = (key, label) => el("button", { class: S.view === key ? "on" : "", onclick: () => { S.view = key; renderTabs(); renderView(); } }, label);
+  const dl = (f, label, ok) => ok && el("a", { href: `/api/jobs/${job.id}/files/${f}?download=true` }, "↓ " + label);
+  tabs.replaceChildren(
+    tab("conv", "대화 흐름"), tab("minutes", "회의록"),
+    el("span", { class: "spacer" }),
+    dl("minutes.md", "회의록", job.has_minutes), dl("transcript_corrected.md", "보정본", job.has_correction),
+    dl("transcript.md", "원문", job.has_transcript),
+    dl("analysis.json", "분석", job.has_analysis),
+  );
+}
+
+function renderView() {
+  const v = $("#view");
+  if (!S.job.has_transcript) {
+    v.replaceChildren(S.job.status === "error" ? "" : el("div", { class: "empty" }, "녹취록을 만드는 중입니다. 단계가 끝나면 대화가 여기 나옵니다."));
+    return;
+  }
+  v.replaceChildren(S.view === "conv" ? convView() : minutesView());
+  if (playingIdx >= 0) { const n = document.getElementById(`turn-${playingIdx}`); n && n.classList.add("playing"); }
+}
+
+// ---------- corrected / original text ----------
+function useCorrected() { const d = S.data[S.job.id]; return S.textMode === "corrected" && !!d?.correction; }
+function turnText(i) {
+  const d = S.data[S.job.id];
+  return useCorrected() ? d.correction.turns[i].text : d.transcript.turns[i].text;
+}
+// Word-level diff (LCS) between original and corrected text, rendered as <del>/<ins>.
+function wordDiff(a, b) {
+  const x = a.split(/\s+/).filter(Boolean), y = b.split(/\s+/).filter(Boolean);
+  const n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+    L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  }
+  const out = [];
+  let i = 0, j = 0;
+  const push = (tag, w) => { out.push(tag ? el(tag, {}, w) : w, " "); };
+  while (i < n && j < m) {
+    if (x[i] === y[j]) { push(null, x[i]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) push("del", x[i++]);
+    else push("ins", y[j++]);
+  }
+  while (i < n) push("del", x[i++]);
+  while (j < m) push("ins", y[j++]);
+  return out;
+}
+
+// ---------- conversation view ----------
+function topicsOf(turns, analysis) {
+  if (analysis?.topics?.length) return analysis.topics;
+  return [{ start_turn: 0, end_turn: turns.length - 1, start: turns[0]?.start || 0, end: turns.at(-1)?.end || 0, title: "전체 대화", summary: "" }];
+}
+function talkStats(turns, from = 0, to = turns.length - 1) {
+  const stats = {};
+  let total = 0;
+  for (let i = from; i <= to; i++) {
+    const t = turns[i], d = Math.max(0, t.end - t.start);
+    (stats[t.speaker] ||= { sec: 0, count: 0 });
+    stats[t.speaker].sec += d; stats[t.speaker].count += 1; total += d;
+  }
+  return { stats, total };
+}
+function shareBar(turns, from, to) {
+  const { stats, total } = talkStats(turns, from, to);
+  return el("div", { class: "share" }, labels().filter((l) => stats[l]).map((l) =>
+    el("span", { style: `width:${stats[l].sec / (total || 1) * 100}%;background:${color(l)}`, title: `${speakerInfo(l).name} ${pct(stats[l].sec / (total || 1))}` })));
+}
+
+function convView() {
+  const d = S.data[S.job.id], turns = d.transcript.turns, analysis = d.analysis;
+  const keyByTurn = Object.fromEntries((analysis?.key_turns || []).map((k) => [k.turn, k]));
+  const topics = topicsOf(turns, analysis);
+  const main = el("div", {});
+
+  // analysis status notice
+  if (S.job.analysis_status === "running") {
+    main.append(el("div", { class: "notice" }, `화자 이름 확률·주제 구간을 분석하는 중입니다 (${S.job.analysis_llm}).`));
+  } else if (S.job.analysis_status === "error") {
+    main.append(el("div", { class: "notice err" }, `대화 분석 실패: ${S.job.analysis_error || ""}`, reanalyzeButton("다시 분석")));
+  } else if (!analysis) {
+    main.append(el("div", { class: "notice" }, "아직 대화 분석이 없습니다. 화자 이름 확률과 주제 구간을 보려면 분석을 실행하세요.", reanalyzeButton("분석 실행")));
+  }
+
+  if (S.job.correction_status === "running") {
+    main.append(el("div", { class: "notice" }, `녹취록을 맥락 기반으로 보정하는 중입니다 (${S.job.analysis_llm}).`));
+  } else if (S.job.correction_status === "error") {
+    main.append(el("div", { class: "notice err" }, `녹취록 보정 실패: ${S.job.correction_error || ""} (원문으로 진행했습니다)`, correctButton("다시 보정")));
+  } else if (!d.correction && S.job.status !== "running" && S.job.status !== "queued") {
+    main.append(el("div", { class: "notice" }, "인식 오류(동음이의어, 고유명사, 반복 인식)를 맥락 기반으로 정리한 보정본을 만들 수 있습니다. 끝나면 대화 분석도 보정본으로 다시 합니다.", correctButton("녹취록 보정 실행")));
+  }
+
+  main.append(timeline(turns, topics, analysis), filters(analysis));
+
+  const q = S.filter.q.trim();
+  topics.forEach((tp, ti) => {
+    const rows = [];
+    let prev = null;
+    for (let i = tp.start_turn; i <= tp.end_turn; i++) {
+      const t = turns[i];
+      const kt = keyByTurn[i];
+      const text = turnText(i);
+      const change = d.changes?.[i];
+      const visible = !S.filter.hidden.has(t.speaker) && (!q || text.toLowerCase().includes(q.toLowerCase())) && (!S.filter.keyOnly || kt);
+      if (!visible) { prev = null; continue; }
+      if (prev && t.start - prev.end >= 8) rows.push(el("div", { class: "gap" }, `· ${dur(t.start - prev.end)} 공백 ·`));
+      const cont = prev && prev.speaker === t.speaker && t.start - prev.end < 8;
+      const info = speakerInfo(t.speaker);
+      rows.push(el("div", { class: `turn${cont ? " cont" : ""}`, id: `turn-${i}` },
+        el("div", { class: "avatar", style: `background:${color(t.speaker)}` }, initial(t.speaker)),
+        el("div", {},
+          el("div", { class: "who-line" },
+            el("b", { style: `color:${color(t.speaker)}` }, info.name),
+            info.kind !== "label" && el("span", { class: "lbl" }, `${t.speaker} · ${info.note}`),
+            info.role && el("span", { class: "lbl" }, info.role),
+            el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start))),
+          el("div", { class: "text-row" },
+            el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start)),
+            el("p", { class: "text" }, highlighted(text, q),
+              change && el("button", { class: "fix", title: "보정 전후 비교", onclick: () => {
+                S.openDiffs.has(i) ? S.openDiffs.delete(i) : S.openDiffs.add(i); renderView();
+              } }, change.corrected === change.original ? "보정 제안 거절됨" : "보정됨"))),
+          change && S.openDiffs.has(i) && el("div", { class: "diff" },
+            change.corrected !== change.original ? wordDiff(change.original, change.corrected) : el("span", { class: "faint" }, "원문 유지"),
+            change.rejected && el("div", { class: "rej" }, "거절된 제안 (원문 대비 길이 변화가 커서 요약·추가로 판단): ", change.rejected)),
+          kt && el("span", { class: `kt kt-${kt.type}` }, KT[kt.type], kt.note && ` · ${kt.note}`))));
+      prev = t;
+    }
+    if (!rows.length) return;
+    main.append(el("section", { class: "topic", id: `topic-${ti}` },
+      el("div", { class: "topic-head" },
+        el("div", { class: "t" },
+          topics.length > 1 && el("span", { class: "num" }, String(ti + 1)),
+          el("h3", {}, tp.title || "주제"),
+          el("button", { class: "ts range", onclick: () => seek(tp.start) }, `${ts(tp.start)} – ${ts(tp.end)}`)),
+        tp.summary && el("p", {}, richText(tp.summary)),
+        shareBar(turns, tp.start_turn, tp.end_turn)),
+      rows));
+  });
+  if (!main.querySelector(".topic")) main.append(el("div", { class: "empty" }, "조건에 맞는 발화가 없습니다."));
+
+  return el("div", { class: "conv" }, main, sidebar(turns, topics, analysis));
+}
+
+function timeline(turns, topics, analysis) {
+  const total = turns.at(-1)?.end || 1;
+  const lanes = el("div", { class: "lanes" });
+  for (const l of labels()) {
+    const lane = el("div", { class: "lane" });
+    turns.forEach((t, i) => {
+      if (t.speaker !== l) return;
+      lane.append(el("span", { style: `left:${t.start / total * 100}%;width:${(t.end - t.start) / total * 100}%;background:${color(l)}`, title: `${ts(t.start)} ${turnText(i).slice(0, 40)}` }));
+    });
+    lanes.append(el("div", { class: "row" }, el("div", { class: "who", title: l }, speakerInfo(l).name), lane));
+  }
+  const overlay = el("div", { class: "tl-overlay" },
+    topics.length > 1 && (() => {
+      let lastLabel = -1;
+      return topics.map((tp, i) => {
+        const x = tp.start / total * 100, show = lastLabel < 0 || x - lastLabel >= 2.5;
+        if (show) lastLabel = x;
+        return el("div", { class: "tl-topic", style: `left:${x}%`, title: `${i + 1}. ${tp.title}` }, show && el("b", {}, String(i + 1)));
+      });
+    })(),
+    el("div", { class: "tl-head", id: "tl-head" }));
+  const grid = el("div", { class: "tl-grid" }, overlay);
+  // overlay spans only the lane column
+  const wrap = el("div", { class: "tl-lanes-wrap" }, lanes,
+    el("div", { style: "position:absolute;top:14px;bottom:0;left:104px;right:0;pointer-events:none" }, grid));
+  lanes.onclick = (e) => {
+    const lane = e.target.closest(".lane");
+    if (!lane) return;
+    const r = lane.getBoundingClientRect();
+    const t = (e.clientX - r.left) / r.width * total;
+    seek(t);
+    const idx = turns.findIndex((x) => x.end >= t);
+    if (idx >= 0) jumpTo(idx);
+  };
+  return el("div", { class: "timeline" }, wrap,
+    el("div", { class: "tl-axis" }, el("div"), el("div", {}, el("span", {}, "0:00"), el("span", {}, ts(total / 2)), el("span", {}, ts(total)))));
+}
+
+function filters(analysis) {
+  const chips = labels().map((l) => el("button", {
+    class: `chip${S.filter.hidden.has(l) ? " off" : ""}`,
+    onclick: () => { S.filter.hidden.has(l) ? S.filter.hidden.delete(l) : S.filter.hidden.add(l); renderView(); },
+  }, el("span", { class: "dot", style: `background:${color(l)}` }), speakerInfo(l).name));
+  const search = el("input", { type: "search", placeholder: "발화 검색", value: S.filter.q });
+  let t;
+  search.oninput = () => { clearTimeout(t); t = setTimeout(() => { S.filter.q = search.value; renderView(); const s = $(".filters input"); s.focus(); s.setSelectionRange(s.value.length, s.value.length); }, 200); };
+  const keyBtn = analysis?.key_turns?.length && el("button", {
+    class: `chip${S.filter.keyOnly ? " on-key" : ""}`, onclick: () => { S.filter.keyOnly = !S.filter.keyOnly; renderView(); },
+  }, "핵심 발화만");
+  const d = S.data[S.job.id];
+  const nFixed = d.correction ? d.correction.changes.filter((c) => c.corrected !== c.original).length : 0;
+  const mode = d.correction && el("span", { class: "seg", title: `보정된 턴 ${nFixed}개` },
+    ...[["corrected", `보정본 (${nFixed})`], ["original", "원문"]].map(([k, label]) =>
+      el("button", { class: S.textMode === k ? "on" : "", onclick: () => { S.textMode = k; renderView(); } }, label)));
+  return el("div", { class: "filters" }, mode, chips, keyBtn, search);
+}
+
+function sidebar(turns, topics, analysis) {
+  const { stats, total } = talkStats(turns);
+  const namesInput = el("input", { placeholder: "참석자 이름 후보 (쉼표 구분)", value: S.job.names || "" });
+  const spCard = el("div", { class: "card" },
+    el("h4", {}, "화자"),
+    S.job.analysis_status !== "running" && el("div", { class: "reanalyze" }, namesInput, reanalyzeButton("다시 분석", namesInput)),
+    labels().map((l) => speakerBlock(l, stats[l] || { sec: 0, count: 0 }, total, turns)),
+    el("div", { class: "hint", style: "margin-top:8px" }, "확정한 이름은 회의록 탭의 「회의록 다시 만들기」에 반영됩니다."));
+  const toc = topics.length > 1 && el("div", { class: "card" }, el("h4", {}, "주제 흐름"),
+    el("ul", { class: "toc" }, topics.map((tp, i) => el("li", {
+      onclick: () => document.getElementById(`topic-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    }, el("span", { class: "num" }, String(i + 1)), el("span", {}, tp.title), el("span", { class: "range" }, ts(tp.start))))));
+  const keys = analysis?.key_turns?.length && el("div", { class: "card" }, el("h4", {}, "핵심 포인트"),
+    Object.keys(KT).map((type) => {
+      const items = analysis.key_turns.filter((k) => k.type === type);
+      return items.length && el("div", { style: "margin-bottom:8px" },
+        el("div", { class: `kt kt-${type}`, style: "margin-bottom:4px" }, `${KT[type]} ${items.length}`),
+        el("ul", { class: "keys" }, items.map((k) => el("li", { onclick: () => jumpTo(k.turn, true) },
+          el("span", { class: "faint" }, ts(turns[k.turn].start)),
+          el("span", { class: "note" }, k.note || turnText(k.turn).slice(0, 30)),
+          el("span", { class: "dot", style: `background:${color(turns[k.turn].speaker)};align-self:center`, title: speakerInfo(turns[k.turn].speaker).name })))));
+    }));
+  return el("aside", { class: "side" }, spCard, toc, keys);
+}
+
+function speakerBlock(label, st, total, turns) {
+  const info = speakerInfo(label), pred = prediction(label);
+  const block = el("div", { class: "sp" },
+    el("div", { class: "sp-head" },
+      el("span", { class: "avatar", style: `background:${color(label)};width:24px;height:24px;font-size:11px;margin:0` }, initial(label)),
+      el("span", { class: "nm" }, info.name),
+      info.kind !== "label" && el("span", { class: "role" }, label),
+      info.role && el("span", { class: "role" }, `· ${info.role}`),
+      info.kind === "confirmed" && el("span", { class: "ok" }, "✓ 확정")),
+    el("div", { class: "stat" }, `발화 ${st.count}회 · ${dur(st.sec)}`,
+      el("span", { class: "bar" }, el("i", { style: `width:${st.sec / (total || 1) * 100}%;background:${color(label)}` })),
+      pct(st.sec / (total || 1))));
+  if (pred) {
+    for (const c of pred.candidates.filter((c) => c.prob >= 0.05).slice(0, 3)) {
+      block.append(el("div", { class: "cand" },
+        el("span", { class: "n", title: c.name }, c.name),
+        el("span", { class: "bar" }, el("i", { style: `width:${c.prob * 100}%;background:${c.name === UNKNOWN ? "var(--faint)" : color(label)}` })),
+        el("span", { class: "p" }, pct(c.prob))));
+      const ev = c.evidence?.slice(0, 3) || [];
+      if (ev.length && c.name !== UNKNOWN && c.prob >= 0.2) {
+        block.append(el("details", { class: "ev-wrap" }, el("summary", {}, `근거 ${ev.length}`),
+          el("ul", { class: "ev" }, ev.map((e) => el("li", { title: "이 발화로 이동해서 재생", onclick: () => jumpTo(e.turn, true) },
+            `${ts(turns[e.turn].start)} ${e.reason || turnText(e.turn).slice(0, 24)}`)))));
+      }
+    }
+  }
+  const listId = `cands-${label}`;
+  const options = new Set([...(pred?.candidates || []).map((c) => c.name).filter((n) => n !== UNKNOWN),
+    ...(S.job.names || "").split(",").map((s) => s.trim()).filter(Boolean)]);
+  const input = el("input", { list: listId, placeholder: "이름 확정", value: S.job.speaker_map?.[label] || "" });
+  const save = el("button", { class: "btn ghost small" }, "저장");
+  save.onclick = async () => {
+    const map = { ...(S.job.speaker_map || {}) };
+    map[label] = input.value.trim();
+    save.disabled = true;
+    try {
+      const r = await api(`/api/jobs/${S.job.id}/speakers`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(map),
+      });
+      S.job = await r.json();
+      renderView();
+    } catch (err) { alert("저장 실패: " + err.message); save.disabled = false; }
+  };
+  input.onkeydown = (e) => { if (e.key === "Enter") save.click(); };
+  block.append(el("div", { class: "confirm" }, input, save), el("datalist", { id: listId }, [...options].map((n) => el("option", { value: n }))));
+  return block;
+}
+
+function correctButton(label) {
+  const b = el("button", { class: "btn ghost small" }, label);
+  b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/jobs/${S.job.id}/correction`, { method: "POST" });
+      clearTimeout(S.pollTimer); poll();
+    } catch (err) { alert("보정 실패: " + err.message); b.disabled = false; }
+  };
+  return b;
+}
+
+function reanalyzeButton(label, namesInput) {
+  const b = el("button", { class: "btn ghost small", title: "이름 후보 안에서 화자별 확률을 다시 계산합니다" }, label);
+  b.onclick = async () => {
+    b.disabled = true;
+    const fd = new FormData();
+    const names = namesInput ? namesInput.value.trim() : S.job.names;
+    if (names) fd.append("names", names);
+    try {
+      await api(`/api/jobs/${S.job.id}/analysis`, { method: "POST", body: fd });
+      clearTimeout(S.pollTimer); poll();
+    } catch (err) { alert("분석 실패: " + err.message); b.disabled = false; }
+  };
+  return b;
+}
+
+// ---------- minutes view ----------
+function minutesView() {
+  const job = S.job, d = S.data[job.id];
+  const wrap = el("div", { class: "minutes" });
+  const doc = el("div", { class: "doc" });
+  if (d.minutes) {
+    if (window.marked && window.DOMPurify) doc.innerHTML = DOMPurify.sanitize(marked.parse(d.minutes));
+    else doc.append(el("pre", { class: "raw" }, d.minutes));  // CDN unavailable: raw Markdown
+  } else {
+    doc.append(el("p", { class: "hint" }, job.status === "error" ? "회의록이 없습니다." : "회의록 작성 중..."));
+  }
+  wrap.append(doc);
+  if (job.has_transcript && (job.status === "done" || job.status === "error")) {
+    const sel = el("select", {}, S.cfg.llms.map((m) => el("option", { value: m, selected: m === job.llm }, m)));
+    const names = el("input", { placeholder: "참석자 이름 후보 (선택)", value: job.names || "" });
+    const btn = el("button", { class: "btn ghost" }, "회의록 다시 만들기");
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const fd = new FormData();
+      fd.append("llm", sel.value);
+      if (names.value.trim()) fd.append("names", names.value.trim());
+      if (job.context) fd.append("context", job.context);  // keep the background given at upload
+      try {
+        await api(`/api/jobs/${job.id}/minutes`, { method: "POST", body: fd });
+        clearTimeout(S.pollTimer); poll(); refreshJobs();
+      } catch (err) { alert("재생성 실패: " + err.message); btn.disabled = false; }
+    };
+    const confirmed = Object.entries(job.speaker_map || {});
+    wrap.append(el("div", { class: "regen" },
+      el("div", {}, el("label", {}, "모델"), sel),
+      el("div", {}, el("label", {}, "이름 후보"), names),
+      btn),
+      el("div", { class: "hint", style: "margin-top:6px" }, confirmed.length
+        ? `확정한 화자 이름이 반영됩니다: ${confirmed.map(([k, v]) => `${k}=${v}`).join(", ")}`
+        : "대화 흐름 탭에서 화자 이름을 확정하면 회의록에 그대로 반영됩니다."),
+      el("div", { class: "hint" }, d.correction ? "다시 만들면 보정본 기준으로 작성됩니다." : "보정본이 없어서 원문 기준으로 작성됩니다."));
+  }
+  return wrap;
+}
+
+// ---------- init ----------
+(async () => {
+  S.cfg = await (await api("/api/config")).json();
+  $("#llm").replaceChildren(...S.cfg.llms.map((m) => el("option", { value: m, selected: m === S.cfg.default_llm }, m)));
+  const jobs = await refreshJobs();
+  if (jobs.length) select(jobs[0].id);
+})();
+</script>
+</body>
+</html>

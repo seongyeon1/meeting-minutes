@@ -1,0 +1,24 @@
+# Copy to llm.toml (gitignored) to name your own models and pick the defaults.
+# Without this file the defaults are `claude`, and `--llm provider:model` always works.
+#
+# providers: anthropic, openai, gemini, openrouter, ollama, compat (any OpenAI-compatible server)
+
+default = "local"            # minutes
+analysis_default = "smart"   # transcript correction + speaker/topic analysis (needs a strong model)
+
+[models.local]
+provider = "ollama"
+model = "qwen3:14b"
+
+[models.smart]
+provider = "openai"
+model = "gpt-5.2"            # openai models are sent as reasoning models (max_completion_tokens)
+
+# A company gateway or self-hosted vLLM. base_url may be an OpenAI-style /v1 base
+# or the full .../chat/completions endpoint. The key is read from api_key_env.
+[models.team]
+provider = "compat"
+base_url = "https://llm-gateway.example.com/v1"
+model = "team-model-id"
+api_key_env = "TEAM_LLM_KEY"
+reasoning = false            # true for gpt-5.x / o-series behind the gateway
