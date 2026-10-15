@@ -7,12 +7,28 @@
 - 브라우저 화면에서 업로드하고, 대화 흐름(주제 구간, 화자 타임라인, 핵심 발화)과 회의록을 봅니다. 발화를 누르면 그 시점부터 원본 음성이 재생됩니다.
 
 ```
-audio ─▶ faster-whisper (ASR, 반복 인식 복구) ─▶ wav2vec2 단어 정렬 ─▶ pyannote 화자 분리
+audio ─▶ faster-whisper (ASR, 반복·누락 구간 복구) ─▶ wav2vec2 단어 정렬 ─▶ pyannote 화자 분리
       ─▶ 화자 턴 transcript.json
       ─▶ LLM: 녹취록 보정 ─▶ 회의록 minutes.md + 대화 분석 analysis.json
 ```
 
 구조와 설계 이유는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 정리했습니다.
+
+## 실행 화면
+
+아래는 지어낸 3인 회의 대본(1분 40초)을 macOS 음성 합성으로 만들어 실제로 돌린 결과입니다. 화자 수와 이름 후보만 넣었고, 녹취록 보정·대화 분석·회의록 모두 같은 모델로 만들었습니다. Apple M4 Pro CPU에서 전체 2분 31초가 걸렸습니다.
+
+**대화 흐름**: 주제 구간, 화자별 타임라인, 이름 후보 확률과 근거
+
+![대화 흐름](docs/images/conversation.png)
+
+**녹취록 보정**: 원문과 단어 단위로 비교 ("부시 알림" → "푸시 알림")
+
+![녹취록 보정](docs/images/correction.png)
+
+**회의록**: 참석자 매핑, 요약, 안건별 논의, 결정사항, 액션 아이템, 미결 사항 (모든 항목에 근거 시각)
+
+![회의록](docs/images/minutes.png)
 
 ## 설치
 

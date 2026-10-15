@@ -9,10 +9,17 @@ Turn a meeting recording into a **speaker-attributed transcript** and **meeting 
 Prompts and the UI are in Korean and the default language is `ko`; other languages work with `--language`, but the minutes template will still be Korean.
 
 ```
-audio ─▶ faster-whisper (ASR, loop repair) ─▶ wav2vec2 alignment ─▶ pyannote diarization
+audio ─▶ faster-whisper (ASR, loop and skipped-speech repair) ─▶ wav2vec2 alignment ─▶ pyannote diarization
       ─▶ speaker turns transcript.json
       ─▶ LLM: transcript correction ─▶ minutes.md + analysis.json
 ```
+
+## Screenshots
+
+A made-up three-person meeting (1:40), synthesized with macOS TTS and run through the real pipeline; 2:31 end to end on an M4 Pro CPU.
+
+![Conversation view](docs/images/conversation.png)
+![Minutes](docs/images/minutes.png)
 
 ## Install
 
