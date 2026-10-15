@@ -126,3 +126,49 @@ def test_correction_chunks_cover_every_turn() -> None:
     assert covered == list(range(10)) and len(chunks) > 1
     prompt = mm.build_correction_prompt(turns, *chunks[1], names=None, context=None, vocab=None)
     assert prompt.count("<context>") == 2  # neighbours on both sides for a middle chunk
+
+
+class _Piece:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeWhisper:
+    """Stands in for whisperx's pipeline; ``model.model.transcribe`` is the non-batched decoder."""
+
+    def __init__(self, text: str) -> None:
+        self.model, self.text, self.calls = self, text, 0
+
+    def transcribe(self, clip: Any, **kw: Any) -> tuple[list[_Piece], None]:
+        self.calls += 1
+        return [_Piece(t) for t in self.text.split("|")], None
+
+
+def _repair(segments: list[dict[str, Any]], redo: str) -> tuple[list[dict[str, Any]], _FakeWhisper, list[str]]:
+    model, logs = _FakeWhisper(redo), []
+    out = mm._repair_segments(model, [0.0] * 16000 * 60, segments, language="ko", vocab=None, log=logs.append)
+    return out, model, logs
+
+
+def test_skipped_speech_is_redecoded() -> None:
+    # 18 s window that came back with only its last sentence (~1.7 chars/s).
+    seg = {"start": 36.8, "end": 55.0, "text": "그럼 출시일은 어떻게 할까요? 원래 계획은 다음 달 20일이었는데요."}
+    full = "박지훈입니다.|QA 범위는 대여, 반납, 연장 세 가지로 잡았습니다.|" + seg["text"]
+    out, model, logs = _repair([seg], full)
+    assert model.calls == 1 and out[0]["text"].startswith("박지훈입니다.")
+    assert "sparse segment at 00:00:36" in logs[0]
+
+
+def test_sparse_retry_that_recovers_nothing_keeps_original() -> None:
+    seg = {"start": 0.0, "end": 20.0, "text": "네 그럼 다음으로 넘어가죠"}
+    out, _, logs = _repair([seg], "네")
+    assert out == [seg] and "kept original" in logs[0]
+
+
+def test_normal_and_short_segments_are_left_alone() -> None:
+    segs = [
+        {"start": 0.0, "end": 10.0, "text": "대여하기와 반납하기 화면은 지난주에 개발을 마쳤고 지금은 알림 기능을 붙이고 있습니다"},
+        {"start": 10.0, "end": 14.0, "text": "네"},  # short reply in a short window
+    ]
+    out, model, _ = _repair(segs, "unused")
+    assert out == segs and model.calls == 0

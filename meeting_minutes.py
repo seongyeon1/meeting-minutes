@@ -129,21 +129,40 @@ def collapse_repeats(text: str) -> str:
     return _CHAR_LOOP_RE.sub(lambda m: m.group(1) + UNREADABLE, " ".join(out))
 
 
-def _repair_repetitions(
+# Batched decoding can also skip most of a window and emit only its last sentence(s); the aligner then
+# pins that text to the start of the window, so the lost speech also shifts the speaker. Real speech
+# runs 5-8 non-space chars/s in Korean (more in English), so a long segment far below that was cut short.
+_SPARSE_MIN_SECONDS = 8.0
+_SPARSE_MAX_CHARS_PER_SECOND = 2.5
+
+
+def _chars(text: str) -> int:
+    return len("".join(text.split()))
+
+
+def is_sparse_segment(seg: dict[str, Any]) -> bool:
+    duration = seg["end"] - seg["start"]
+    return duration >= _SPARSE_MIN_SECONDS and _chars(seg["text"]) / duration < _SPARSE_MAX_CHARS_PER_SECOND
+
+
+def _repair_segments(
     model: Any, audio: Any, segments: list[dict[str, Any]], *, language: str, vocab: Optional[str],
     log: Callable[[str], None],
 ) -> list[dict[str, Any]]:
-    """Re-decode looped segments without batching, where faster-whisper's temperature fallback applies.
+    """Re-decode broken segments without batching, where faster-whisper's temperature fallback applies.
 
     WhisperX's batched decoding has no compression-ratio fallback, so a decoder that falls into a
-    loop ("Q. Q. Q. ...") keeps it and swallows the real speech under it. Whatever still loops after
-    the retry is collapsed to a marker rather than shown as text.
+    loop ("Q. Q. Q. ...") keeps it and swallows the real speech under it; whatever still loops after
+    the retry is collapsed to a marker rather than shown as text. Segments with far too little text
+    for their length (skipped speech) are retried too, and the retry wins only if it recovers more.
     """
     sr = 16000
     out = []
     for seg in segments:
         text = seg["text"]
-        if not (is_repetition_loop(text) or len(text) > 40 and compression_ratio(text) > COMPRESSION_RATIO_THRESHOLD):
+        looping = is_repetition_loop(text) or len(text) > 40 and compression_ratio(text) > COMPRESSION_RATIO_THRESHOLD
+        sparse = not looping and is_sparse_segment(seg)
+        if not (looping or sparse):
             out.append(seg)
             continue
         clip = audio[int(seg["start"] * sr) : int(seg["end"] * sr)]
@@ -151,9 +170,15 @@ def _repair_repetitions(
             clip, language=language, beam_size=5, condition_on_previous_text=False,
             compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD, initial_prompt=vocab, vad_filter=False,
         )
-        text = " ".join(p.text.strip() for p in pieces).strip()
-        fixed = collapse_repeats(text) if text else UNREADABLE
-        log(f"repetition loop at {_fmt_ts(seg['start'])} re-decoded" + (" (still looping, collapsed)" if fixed != text else ""))
+        redone = " ".join(p.text.strip() for p in pieces).strip()
+        if sparse:
+            better = _chars(redone) > _chars(text) and not is_repetition_loop(redone)
+            log(f"sparse segment at {_fmt_ts(seg['start'])} re-decoded ({_chars(text)} -> {_chars(redone)} chars"
+                + ("" if better else ", kept original") + ")")
+            out.append({**seg, "text": redone} if better else seg)
+            continue
+        fixed = collapse_repeats(redone) if redone else UNREADABLE
+        log(f"repetition loop at {_fmt_ts(seg['start'])} re-decoded" + (" (still looping, collapsed)" if fixed != redone else ""))
         out.append({**seg, "text": fixed})
     return out
 
@@ -196,7 +221,7 @@ def transcribe_and_diarize(
     )
     result = model.transcribe(audio, batch_size=batch_size, language=language)
     lang = result["language"]
-    result["segments"] = _repair_repetitions(
+    result["segments"] = _repair_segments(
         model, audio, result["segments"], language=lang, vocab=vocab, log=log
     )
     log(f"ASR done ({lang}, {len(result['segments'])} segments, {time.monotonic() - t0:.0f}s)")
