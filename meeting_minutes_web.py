@@ -26,7 +26,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 import meeting_minutes as mm
-from voicekit import agent_cli, manage
+from voicekit import agent_cli, manage, memory
 from voicekit.agent_run import PRESETS, AgentRunner
 from voicekit.jobs import Job, JobNotFound, JobStore
 from voicekit.profiles import get_profile, load_profiles
@@ -95,6 +95,7 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
             "profiles": [p.summary() for p in load_profiles().values()], "default_profile": "meeting",
             "home": str(store.out_root.resolve()), "user_profile_dir": str(manage.USER_PROFILE_DIR),
             "agents": agent_cli.available_agents(), "agent_presets": list(PRESETS),
+            "memory_enabled": memory.enabled(),
         }
 
     @app.get("/api/jobs")
@@ -116,6 +117,7 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         language: Annotated[Optional[str], Form()] = "ko",
         diarize: Annotated[Optional[bool], Form()] = None,
         local_only: Annotated[bool, Form()] = False,
+        use_memory: Annotated[bool, Form()] = True,
     ) -> dict[str, Any]:
         llm = llm or mm.default_llm()
         check_llm(llm)
@@ -137,7 +139,7 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
             names=_clean(names), context=_clean(context), vocab=_clean(vocab),
             correct=chosen.correct if correct is None else correct,
             profile=chosen.id, language=None if (language or "ko") == "auto" else _clean(language) or "ko",
-            diarize=diarize, local_only=local_only,
+            diarize=diarize, local_only=local_only, use_memory=use_memory,
         )
         store.submit(job, audio, speakers)
         return job.summary()
@@ -214,6 +216,63 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         cleaned = {k: v.strip()[:40] for k, v in mapping.items() if v and v.strip()}
         store.set_speaker_map(job, cleaned)
         return job.summary()
+
+    @app.put("/api/jobs/{job_id}/turns/{index}")
+    def edit_turn(
+        job_id: str, index: int, text: Annotated[str, Form()], corrected: Annotated[bool, Form()] = False,
+        scope: Annotated[Optional[str], Form()] = None,
+    ) -> dict[str, Any]:
+        """Fix the text of one turn. The fix is remembered for this recording type (or ``common``)."""
+        job = store.get(job_id)
+        require_transcript(job)
+        try:
+            return store.edit_turn(job, index, text, corrected=corrected, scope=memory.valid_scope(scope) if scope else None)
+        except IndexError as e:
+            raise HTTPException(404, "no such turn") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/memory/{scope}")
+    def memory_entries(scope: str) -> dict[str, Any]:
+        try:
+            return {"scope": scope, "enabled": memory.enabled(), "min_count": memory.MIN_COUNT, "entries": memory.view(scope)}
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/memory/{scope}")
+    def memory_add(
+        scope: str, right: Annotated[str, Form()], wrong: Annotated[Optional[str], Form()] = None,
+    ) -> dict[str, Any]:
+        """Add a term by hand: ``wrong`` is a comma-separated list of spellings the recognizer gets wrong."""
+        try:
+            return memory.add(scope, right, [w for w in (wrong or "").split(",") if w.strip()])
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.put("/api/memory/{scope}/{entry_id}")
+    def memory_update(
+        scope: str, entry_id: str, enabled: Annotated[Optional[bool], Form()] = None,
+        pinned: Annotated[Optional[bool], Form()] = None,
+    ) -> dict[str, str]:
+        try:
+            memory.update(scope, entry_id, enabled=enabled, pinned=pinned)
+        except KeyError as e:
+            raise HTTPException(404, "no such term") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"status": "ok"}
+
+    @app.delete("/api/memory/{scope}/{entry_id}")
+    def memory_delete(scope: str, entry_id: str) -> dict[str, str]:
+        try:
+            memory.remove(scope, entry_id)
+        except KeyError as e:
+            raise HTTPException(404, "no such term") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"status": "deleted"}
 
     @app.get("/api/jobs/{job_id}/files/{name}")
     def get_file(job_id: str, name: str, download: bool = False) -> FileResponse:

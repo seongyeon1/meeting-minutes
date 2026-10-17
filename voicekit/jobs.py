@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import meeting_minutes as mm
+from voicekit import memory
 from voicekit.profiles import Profile, get_profile
 
 JOB_META = "job.json"
@@ -64,6 +65,7 @@ class Job:
     diarize: Optional[bool] = None  # None = the profile's default
     num_speakers: Optional[int] = None
     local_only: bool = False  # stop after the local stages; an agent writes the document
+    use_memory: bool = True  # apply the remembered terms of this recording type (voicekit.memory)
 
     def summary(self) -> dict[str, Any]:
         """Job state without file contents, for the job list and polling."""
@@ -93,6 +95,7 @@ class Job:
             "diarize": self.profile_default_diarize() if self.diarize is None else self.diarize,
             "analysis_enabled": self._profile().analysis,
             "local_only": self.local_only,
+            "use_memory": self.use_memory,
             "dir": str(self.out_dir.resolve()),
             "agent_status": self._agent_status(),
             "has_audio": self.audio_path() is not None,
@@ -129,6 +132,7 @@ class Job:
                 "log", "error", "correct", "correction_status", "correction_error", "analysis_status",
                 "analysis_error", "speaker_map", "created_at",
                 "finished_at", "speakers", "profile", "language", "diarize", "num_speakers", "local_only",
+                "use_memory",
             )
         }
         (self.out_dir / JOB_META).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -309,6 +313,51 @@ class JobStore:
         self._update(job, speaker_map=mapping)
 
     @staticmethod
+    def vocab_for(job: Job) -> Optional[str]:
+        """The job's own vocab plus the terms remembered for its recording type."""
+        return memory.merge_vocab(job.vocab, job.profile) if job.use_memory else job.vocab
+
+    def edit_turn(self, job: Job, index: int, text: str, *, corrected: bool, scope: Optional[str] = None) -> dict[str, Any]:
+        """Store the user's fix of one turn (in the corrected or the original transcript) and learn from it."""
+        busy = "running" in (job.status, job.correction_status, job.analysis_status, job._agent_status())
+        if busy or job.status == "queued":
+            raise RuntimeError("job is still working; edit the transcript when it is done")
+        text = " ".join(text.split())
+        if not text:
+            raise ValueError("text is empty")
+        path = job.out_dir / ("transcript_corrected.json" if corrected else "transcript.json")
+        if not path.exists():
+            raise ValueError("there is no corrected transcript to edit" if corrected else "no transcript yet")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        turns = data["turns"]
+        if not 0 <= index < len(turns):
+            raise IndexError(index)
+        before = turns[index]["text"]
+        if before == text:
+            return {"turn": index, "text": text, "learned": []}
+        turns[index]["text"] = text
+        if corrected:
+            changes = data.setdefault("changes", [])
+            change = next((c for c in changes if c.get("turn") == index), None)
+            if change:
+                change["corrected"] = text
+            else:
+                changes.append({"turn": index, "original": before, "corrected": text, "rejected": None})
+            mm.save_correction(data, job.out_dir)
+        else:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            mm.save_transcript_md([mm.Turn(**t) for t in turns], job.out_dir)
+        log_path = job.out_dir / "edits.json"
+        try:
+            log = json.loads(log_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log = []
+        log.append({"turn": index, "before": before, "after": text, "corrected": corrected, "at": time.time()})
+        log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+        learned = memory.learn(scope or job.profile, memory.extract_pairs(before, text))
+        return {"turn": index, "text": text, "learned": [item.as_dict() for item in learned]}
+
+    @staticmethod
     def _load_turns(job: Job, *, original: bool = False) -> list[mm.Turn]:
         """Corrected text when there is one; speakers and timings are the same either way."""
         corrected = job.out_dir / "transcript_corrected.json"
@@ -336,11 +385,17 @@ class JobStore:
                 min_speakers=None,
                 max_speakers=None,
                 diarize_device="cpu",
-                vocab=job.vocab,
+                vocab=self.vocab_for(job),
                 on_progress=lambda m: self._progress(job, m),
                 diarize=diarize,
             )
             turns = mm.segments_to_turns(segments)
+            applied = memory.apply_to_turns(turns, job.profile) if job.use_memory else []
+            if applied:
+                (job.out_dir / "memory_applied.json").write_text(
+                    json.dumps(applied, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                self._progress(job, f"기억한 용어 {len(applied)}곳 적용")
             mm.save_transcript_json(turns, job.out_dir, source=job.filename)
             mm.save_transcript_md(turns, job.out_dir)
             self._update(job, speakers=sorted({t.speaker for t in turns}))
@@ -373,7 +428,7 @@ class JobStore:
     def _write_minutes(self, job: Job, turns: list[mm.Turn]) -> None:
         t0 = time.monotonic()
         minutes = mm.write_minutes(
-            turns, llm=job.llm, names=job.names, context=job.context, vocab=job.vocab,
+            turns, llm=job.llm, names=job.names, context=job.context, vocab=self.vocab_for(job),
             env_file=self.env_file, speaker_map=job.speaker_map, profile=job._profile(),
         )
         (job.out_dir / "minutes.md").write_text(minutes, encoding="utf-8")
@@ -386,7 +441,7 @@ class JobStore:
         try:
             t0 = time.monotonic()
             result = mm.correct_transcript(
-                turns, llm=job.analysis_llm, names=job.names, context=job.context, vocab=job.vocab,
+                turns, llm=job.analysis_llm, names=job.names, context=job.context, vocab=self.vocab_for(job),
                 env_file=self.env_file, profile=job._profile(),
             )
             mm.save_correction(result, job.out_dir)

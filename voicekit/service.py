@@ -130,7 +130,7 @@ class Service:
         chosen = get_profile(profile or job.profile)
         turns = self.store._load_turns(job)
         user = mm.build_user_prompt(
-            turns, names=names or job.names, context=context or job.context, vocab=vocab or job.vocab,
+            turns, names=names or job.names, context=context or job.context, vocab=vocab or self.store.vocab_for(job),
             speaker_map=job.speaker_map, profile=chosen,
         )
         return {
@@ -155,7 +155,7 @@ class Service:
         chosen = get_profile(profile or job.profile)
         text = mm.write_minutes(
             self.store._load_turns(job), llm=llm, names=names or job.names, context=context or job.context,
-            vocab=job.vocab, env_file=self.env_file, speaker_map=job.speaker_map, profile=chosen,
+            vocab=self.store.vocab_for(job), env_file=self.env_file, speaker_map=job.speaker_map, profile=chosen,
         )
         self.store._update(job, llm=llm, profile=chosen.id)
         self.store.save_document(job, text)

@@ -220,6 +220,13 @@
   .agent { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; display: grid; gap: 8px; }
   .agent .row, .prof-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .agent h3 { margin: 0; font-size: 14px; }
+  .turn-edit { display: grid; gap: 6px; margin: 2px 0; }
+  .turn-edit textarea { min-height: 56px; }
+  .turn-edit .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .turn-note { font-size: 12px; color: var(--ok); margin: 2px 0; }
+  .mem-off { opacity: .5; }
+  .notice[hidden] { display: none; }
+  .mem-add { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: end; margin-top: 14px; }
   .chat { display: grid; gap: 10px; margin: 14px 0 12px; max-height: 58vh; overflow-y: auto; padding-right: 4px; }
   .chat-me { display: flex; justify-content: flex-end; }
   .chat-bubble { max-width: 88%; border-radius: 10px; padding: 10px 12px; font-size: 13.5px; display: grid; gap: 6px; }
@@ -265,6 +272,7 @@
   </div>
   <div class="actions">
     <button class="btn ghost" id="prof-btn" title="녹음 유형 보기·추가·수정">녹음 유형</button>
+    <button class="btn ghost" id="mem-btn" title="자주 틀리는 단어를 기억해 다음 녹음에서 바로잡기">기억한 용어</button>
     <button class="btn ghost" id="agent-btn" title="Claude Code·Codex 등에 이 도구 연결">에이전트 연결</button>
     <button class="btn" id="new-btn">+ 새 녹음</button>
   </div>
@@ -312,6 +320,9 @@
     <input id="vocab" placeholder="QA, 결제 모듈, 스프린트">
     <label for="context" id="context-label">회의 배경</label>
     <textarea id="context" placeholder="11월 출시 일정 점검 회의"></textarea>
+    <label class="check"><input type="checkbox" id="use-memory" checked>
+      <span>기억한 용어 사용<br>
+      <span class="hint">이 녹음 유형에서 고쳐 둔 단어를 인식 힌트와 자동 바로잡기에 씁니다.</span></span></label>
     <label for="mode">처리 방식</label>
     <select id="mode">
       <option value="auto">녹취부터 문서까지 자동</option>
@@ -331,6 +342,24 @@
       <button class="btn ghost" type="button" onclick="upload.close()">취소</button>
       <button class="btn" id="submit" type="submit" disabled>시작</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="memory" class="wide">
+  <form method="dialog" id="mem-form">
+    <h2>기억한 용어</h2>
+    <p class="hint" style="margin:0">대화 흐름에서 발화를 고치면 「잘못 인식된 표기 → 올바른 표기」를 녹음 유형별로 기억합니다.
+      같은 고침이 <span id="mem-min">2</span>번 쌓이거나 직접 고정하면 다음 녹음부터 인식 힌트와 자동 바로잡기에 쓰입니다.
+      모든 처리는 이 PC 안에서 하고 LLM을 부르지 않습니다. 「공통」은 모든 유형에 적용됩니다.</p>
+    <div id="mem-off" class="notice err" hidden>VOICEKIT_MEMORY=off 라서 기억한 용어를 쓰지 않습니다.</div>
+    <div class="prof-list" id="mem-scopes"></div>
+    <div id="mem-body"></div>
+    <div class="mem-add">
+      <div><label for="mem-right">올바른 표기</label><input id="mem-right" placeholder="QA"></div>
+      <div><label for="mem-wrong">잘못 인식되는 표기 (쉼표로 여러 개, 비워도 됨)</label><input id="mem-wrong" placeholder="카, 큐에이"></div>
+      <button class="btn" type="button" id="mem-add">추가</button>
+    </div>
+    <div class="dialog-actions"><button class="btn ghost" type="submit">닫기</button></div>
   </form>
 </dialog>
 
@@ -390,6 +419,7 @@ const S = {
   view: "conv",
   textMode: "corrected",        // corrected | original
   openDiffs: new Set(),
+  editTurn: null, turnNote: null,   // turn being edited; note about what the memory learned
   filter: { hidden: new Set(), q: "", keyOnly: false },
   follow: true,
   pollTimer: null, tickTimer: null,
@@ -588,6 +618,7 @@ $("#form").onsubmit = async (e) => {
   fd.append("local_only", local ? "true" : "false");
   if (local) { fd.delete("llm"); fd.append("correct", "false"); } else fd.append("correct", $("#correct").checked ? "true" : "false");
   fd.append("diarize", $("#diarize").checked ? "true" : "false");
+  fd.append("use_memory", $("#use-memory").checked ? "true" : "false");
   const btn = $("#submit");
   btn.disabled = true; btn.textContent = "업로드 중...";
   try {
@@ -850,6 +881,42 @@ function shareBar(turns, from, to) {
     el("span", { style: `width:${stats[l].sec / (total || 1) * 100}%;background:${color(l)}`, title: `${speakerInfo(l).name} ${pct(stats[l].sec / (total || 1))}` })));
 }
 
+// ---------- fix a turn (and teach the memory) ----------
+function turnEditor(i, text) {
+  const ta = el("textarea", {});
+  ta.value = text;
+  const common = el("input", { type: "checkbox" });
+  const cancel = () => { S.editTurn = null; renderView(); };
+  const save = async () => {
+    const next = ta.value.trim();
+    if (!next || next === text) return cancel();
+    const job = S.job, d = S.data[job.id], corrected = useCorrected();
+    const fd = new FormData();
+    fd.append("text", next); fd.append("corrected", corrected ? "true" : "false");
+    if (common.checked) fd.append("scope", "common");
+    try {
+      const r = await (await api(`/api/jobs/${job.id}/turns/${i}`, { method: "PUT", body: fd })).json();
+      (corrected ? d.correction : d.transcript).turns[i].text = r.text;
+      if (corrected) d.changes[i] = { ...(d.changes[i] || { turn: i, original: text, rejected: null }), corrected: r.text };
+      const where = common.checked ? "공통" : "이 유형";
+      const notes = r.learned.map((l) => `「${l.wrong}」 → 「${l.right}」 ${where}에 기억함 (${l.replace ? "이제 자동 적용" : l.active ? "인식 힌트로 쓰임, 한 글자 표기는 고정해야 자동 치환" : `${l.count}/${S.cfg.memory_min || 2}, 한 번 더 고치면 사용`})`);
+      S.turnNote = { i, text: [...notes, job.has_minutes ? "문서에는 다시 생성해야 반영됩니다." : ""].filter(Boolean).join(" · ") };
+      S.editTurn = null; renderView();
+    } catch (err) { alert("저장 실패: " + err.message); }
+  };
+  ta.onkeydown = (e) => {
+    if (e.key === "Escape") cancel();
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); save(); }
+  };
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
+  return el("div", { class: "turn-edit" }, ta,
+    el("div", { class: "row" },
+      el("button", { class: "btn small", type: "button", onclick: save }, "저장"),
+      el("button", { class: "btn ghost small", type: "button", onclick: cancel }, "취소"),
+      el("label", { class: "check hint", style: "margin:0;display:flex;gap:4px;align-items:center" }, common, "모든 녹음 유형에 적용"),
+      el("span", { class: "hint" }, "Enter 저장 · Esc 취소")));
+}
+
 function convView() {
   const d = S.data[S.job.id], turns = d.transcript.turns, analysis = d.analysis;
   const keyByTurn = Object.fromEntries((analysis?.key_turns || []).map((k) => [k.turn, k]));
@@ -899,10 +966,12 @@ function convView() {
             el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start))),
           el("div", { class: "text-row" },
             el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start)),
-            el("p", { class: "text" }, highlighted(text, q),
+            S.editTurn === i ? turnEditor(i, text) : el("p", { class: "text" }, highlighted(text, q),
+              S.job.status === "done" && S.job.agent_status !== "running" && el("button", { class: "fix", title: "이 발화 고치기 (자주 틀리는 단어는 기억합니다)", onclick: () => { S.editTurn = i; renderView(); } }, "수정"),
               change && el("button", { class: "fix", title: "보정 전후 비교", onclick: () => {
                 S.openDiffs.has(i) ? S.openDiffs.delete(i) : S.openDiffs.add(i); renderView();
               } }, change.corrected === change.original ? "보정 제안 거절됨" : "보정됨"))),
+          S.turnNote?.i === i && el("div", { class: "turn-note" }, S.turnNote.text),
           change && S.openDiffs.has(i) && el("div", { class: "diff" },
             change.corrected !== change.original ? wordDiff(change.original, change.corrected) : el("span", { class: "faint" }, "원문 유지"),
             change.rejected && el("div", { class: "rej" }, "거절된 제안 (원문 대비 길이 변화가 커서 요약·추가로 판단): ", change.rejected)),
@@ -1246,6 +1315,53 @@ function agentView() {
   requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   return wrap;
 }
+
+// ---------- remembered terms ----------
+const memDlg = $("#memory");
+let memScope = null;
+$("#mem-btn").onclick = () => {
+  memScope = S.job?.profile || S.cfg.default_profile;
+  $("#mem-off").hidden = S.cfg.memory_enabled !== false;
+  memDlg.showModal(); loadMemory();
+};
+async function loadMemory() {
+  $("#mem-scopes").replaceChildren(...[["common", "공통"], ...S.cfg.profiles.map((p) => [p.id, p.label])].map(([id, label]) =>
+    el("button", { type: "button", class: `chip${id === memScope ? " on-key" : ""}`, onclick: () => { memScope = id; loadMemory(); } }, label)));
+  const body = $("#mem-body");
+  let d;
+  try { d = await (await api(`/api/memory/${encodeURIComponent(memScope)}`)).json(); }
+  catch (err) { body.replaceChildren(el("div", { class: "error-box" }, err.message)); return; }
+  S.cfg.memory_min = d.min_count; $("#mem-min").textContent = d.min_count;
+  const call = async (method, url, fields) => {
+    const fd = new FormData(); for (const [k, v] of Object.entries(fields || {})) fd.append(k, v);
+    try { await api(url, { method, body: fd }); } catch (err) { alert(err.message); }
+    loadMemory();
+  };
+  body.replaceChildren(...(d.entries.length ? d.entries.map((e) => {
+    const url = `/api/memory/${encodeURIComponent(memScope)}/${e.id}`;
+    return el("div", { class: `agent${e.enabled ? "" : " mem-off"}` },
+      el("div", { class: "row" }, el("b", {}, e.right),
+        OKTAG(e.active && e.enabled, "사용 중", e.enabled ? `후보 ${e.count}/${d.min_count}` : "꺼짐"),
+        e.pinned && el("span", { class: "tag" }, "고정"),
+        el("span", { style: "flex:1" }),
+        el("button", { type: "button", class: "btn ghost small", onclick: () => call("PUT", url, { pinned: !e.pinned }) }, e.pinned ? "고정 해제" : "고정"),
+        el("button", { type: "button", class: "btn ghost small", onclick: () => call("PUT", url, { enabled: !e.enabled }) }, e.enabled ? "끄기" : "켜기"),
+        el("button", { type: "button", class: "btn ghost small danger", onclick: () => { if (confirm(`「${e.right}」를 지울까요?`)) call("DELETE", url); } }, "삭제")),
+      Object.keys(e.wrong || {}).length > 0 && el("div", { class: "prof-list", style: "margin:0" },
+        Object.entries(e.wrong).map(([w, n]) => el("span", { class: "tag", title: w.length < 2 && !e.pinned ? "한 글자 표기는 고정해야 자동으로 바꿉니다" : "" }, `${w} → ${e.right} ×${n}` + (w.length < 2 && !e.pinned ? " (힌트만)" : "")))));
+  }) : [el("div", { class: "hint", style: "margin-top:12px" }, "아직 기억한 용어가 없습니다. 대화 흐름에서 발화의 「수정」으로 고치거나 아래에서 직접 추가하세요.")]));
+}
+$("#mem-add").onclick = async () => {
+  const right = $("#mem-right").value.trim();
+  if (!right) return;
+  const fd = new FormData(); fd.append("right", right); fd.append("wrong", $("#mem-wrong").value);
+  try {
+    await api(`/api/memory/${encodeURIComponent(memScope)}`, { method: "POST", body: fd });
+    $("#mem-right").value = ""; $("#mem-wrong").value = "";
+  } catch (err) { alert(err.message); }
+  loadMemory();
+};
+$("#mem-right").onkeydown = $("#mem-wrong").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("#mem-add").click(); } };
 
 // ---------- agents ----------
 const agentsDlg = $("#agents");
