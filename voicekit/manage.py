@@ -127,7 +127,10 @@ def install_agent(target: str, home: Optional[Path] = None) -> dict[str, Any]:
 
 def write_agents_block() -> None:
     """Idempotent marked block in ``~/.codex/AGENTS.md`` so Codex knows when to reach for the tools."""
-    path = _agents_md()
+    home = Path.home().resolve()
+    path = _agents_md().resolve()
+    if path.name != "AGENTS.md" or not path.is_relative_to(home):  # HOME is the only variable part; refuse anything odd
+        raise RuntimeError(f"refusing to write outside the home folder: {path}")
     body = SKILL_FILE.read_text(encoding="utf-8").split("---", 2)[-1].strip()
     block = f"{AGENTS_MARK[0]}\n## voicekit (local speech pipeline)\n\n{body}\n{AGENTS_MARK[1]}\n"
     path.parent.mkdir(parents=True, exist_ok=True)
