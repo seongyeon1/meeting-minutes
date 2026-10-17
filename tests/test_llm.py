@@ -36,7 +36,7 @@ def test_config_aliases_and_defaults(tmp_path: Path) -> None:
     )
     mm.configure_llms(cfg)
     assert (mm.default_llm(), mm.default_analysis_llm()) == ("team", "big")
-    assert mm.llm_choices() == ["team", "big", "claude", "gpt"]
+    assert mm.llm_choices() == ["team", "big", "claude", "gpt", "claude-code", "codex"]
     team = mm.resolve_llm("team")
     assert (team.provider, team.api_key_env, team.reasoning) == ("compat", "TEAM_KEY", False)
     assert mm.resolve_llm("big").reasoning

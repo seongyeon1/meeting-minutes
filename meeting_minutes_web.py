@@ -1,4 +1,4 @@
-"""Local web UI for meeting-minutes: upload audio, watch progress, read the conversation and minutes.
+"""Local web UI: upload a recording, watch progress, read the conversation and the document written from it.
 
 Binds to 127.0.0.1 by default; audio and transcripts stay on this machine and only the
 transcript text goes to the LLM, same as the CLI. STT jobs run one at a time because
@@ -16,21 +16,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
-import threading
-import time
-import traceback
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Optional
+from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 import meeting_minutes as mm
+from voicekit import manage
+from voicekit.jobs import Job, JobNotFound, JobStore
+from voicekit.profiles import get_profile, load_profiles
 
 INDEX_HTML = Path(__file__).with_name("web") / "index.html"
 OUTPUT_FILES = {
@@ -41,296 +39,6 @@ AUDIO_TYPES = {
     ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "video/mp4",
     ".aac": "audio/aac", ".ogg": "audio/ogg", ".webm": "audio/webm", ".flac": "audio/flac",
 }
-JOB_META = "job.json"
-
-Status = Literal["queued", "running", "done", "error"]
-StepStatus = Literal["none", "running", "done", "error"]
-
-
-@dataclass
-class Job:
-    """One uploaded recording and the state of its pipeline run."""
-
-    id: str
-    filename: str
-    out_dir: Path
-    llm: str
-    analysis_llm: str = field(default_factory=mm.default_analysis_llm)
-    names: Optional[str] = None
-    context: Optional[str] = None
-    vocab: Optional[str] = None
-    status: Status = "queued"
-    stage: str = "대기 중"
-    log: list[str] = field(default_factory=list)
-    error: Optional[str] = None
-    correct: bool = True
-    correction_status: StepStatus = "none"
-    correction_error: Optional[str] = None
-    analysis_status: StepStatus = "none"
-    analysis_error: Optional[str] = None
-    speaker_map: dict[str, str] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
-    finished_at: Optional[float] = None
-    speakers: list[str] = field(default_factory=list)
-
-    def summary(self) -> dict[str, Any]:
-        """Job state without file contents, for the job list and polling."""
-        return {
-            "id": self.id,
-            "filename": self.filename,
-            "llm": self.llm,
-            "analysis_llm": self.analysis_llm,
-            "names": self.names,
-            "context": self.context,
-            "status": self.status,
-            "stage": self.stage,
-            "log": self.log,
-            "error": self.error,
-            "correct": self.correct,
-            "correction_status": self.correction_status,
-            "correction_error": self.correction_error,
-            "analysis_status": self.analysis_status,
-            "analysis_error": self.analysis_error,
-            "speaker_map": self.speaker_map,
-            "created_at": self.created_at,
-            "finished_at": self.finished_at,
-            "speakers": self.speakers,
-            "has_audio": self.audio_path() is not None,
-            "has_transcript": (self.out_dir / "transcript.json").exists(),
-            "has_minutes": (self.out_dir / "minutes.md").exists(),
-            "has_analysis": (self.out_dir / "analysis.json").exists(),
-            "has_correction": (self.out_dir / "transcript_corrected.json").exists(),
-        }
-
-    def audio_path(self) -> Optional[Path]:
-        return next(iter(sorted(self.out_dir.glob("input.*"))), None)
-
-    def save_meta(self) -> None:
-        """Persist the job so it survives a server restart (outputs are already files)."""
-        meta = {
-            k: getattr(self, k)
-            for k in (
-                "id", "filename", "llm", "analysis_llm", "names", "context", "vocab", "status", "stage",
-                "log", "error", "correct", "correction_status", "correction_error", "analysis_status",
-                "analysis_error", "speaker_map", "created_at",
-                "finished_at", "speakers",
-            )
-        }
-        (self.out_dir / JOB_META).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    @classmethod
-    def load(cls, out_dir: Path) -> Job:
-        if not (out_dir / JOB_META).exists():
-            return cls._from_outputs(out_dir)
-        meta = json.loads((out_dir / JOB_META).read_text(encoding="utf-8"))
-        job = cls(out_dir=out_dir, **meta)
-        if job.status in ("queued", "running"):
-            job.status, job.stage, job.error = "error", "중단됨", "서버가 재시작되어 작업이 중단됐습니다."
-        if job.analysis_status == "running":
-            job.analysis_status, job.analysis_error = "error", "서버가 재시작되어 분석이 중단됐습니다."
-        if job.correction_status == "running":
-            job.correction_status, job.correction_error = "error", "서버가 재시작되어 보정이 중단됐습니다."
-        return job
-
-
-    @classmethod
-    def _from_outputs(cls, out_dir: Path) -> Job:
-        """Rebuild a job from its files alone (runs made before job.json existed)."""
-        transcript = out_dir / "transcript.json"
-        data = json.loads(transcript.read_text(encoding="utf-8"))
-        has_minutes = (out_dir / "minutes.md").exists()
-        return cls(
-            id=out_dir.name,
-            filename=Path(data.get("source") or out_dir.name).name,
-            out_dir=out_dir,
-            llm=mm.default_llm(),
-            status="done" if has_minutes else "error",
-            stage="완료" if has_minutes else "회의록 없음",
-            analysis_status="done" if (out_dir / "analysis.json").exists() else "none",
-            correct=False,
-            correction_status="done" if (out_dir / "transcript_corrected.json").exists() else "none",
-            created_at=transcript.stat().st_mtime,
-            finished_at=transcript.stat().st_mtime,
-            speakers=sorted({t["speaker"] for t in data["turns"]}),
-        )
-
-
-def _error_text(exc: BaseException) -> str:
-    # SystemExit carries the user-facing hint (missing key, gated model) as its message.
-    return str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
-
-
-class JobStore:
-    """Job registry with a single STT worker and a separate LLM worker pool."""
-
-    def __init__(self, out_root: Path, env_file: Optional[Path], analysis_llm: str) -> None:
-        self.out_root = out_root
-        self.env_file = env_file
-        self.analysis_llm = analysis_llm
-        self.jobs: dict[str, Job] = {}
-        self.lock = threading.Lock()
-        self.stt_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
-        # LLM calls are network-bound; they shouldn't wait behind a long STT job.
-        self.llm_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm")
-        self._load_existing()
-
-    def _load_existing(self) -> None:
-        if not self.out_root.exists():
-            return
-        for out_dir in self.out_root.iterdir():
-            if not ((out_dir / JOB_META).exists() or (out_dir / "transcript.json").exists()):
-                continue
-            try:
-                job = Job.load(out_dir)
-            except (OSError, ValueError, TypeError, KeyError) as e:
-                mm._log(f"skip {out_dir.name}: {e}")
-                continue
-            self.jobs[job.id] = job
-
-    def get(self, job_id: str) -> Job:
-        job = self.jobs.get(job_id)
-        if not job:
-            raise HTTPException(404, "job not found")
-        return job
-
-    def _update(self, job: Job, **changes: Any) -> None:
-        with self.lock:
-            for k, v in changes.items():
-                setattr(job, k, v)
-            job.save_meta()
-
-    def _progress(self, job: Job, msg: str) -> None:
-        mm._log(f"[{job.id}] {msg}")
-        with self.lock:
-            job.stage = msg
-            job.log.append(f"{time.strftime('%H:%M:%S')} {msg}")
-            job.save_meta()
-
-    def _fail(self, job: Job, exc: BaseException) -> None:
-        traceback.print_exception(exc)
-        self._update(job, status="error", error=_error_text(exc), stage="실패", finished_at=time.time())
-
-    def submit(self, job: Job, audio: Path, speakers: Optional[int]) -> None:
-        self.jobs[job.id] = job
-        job.save_meta()
-        self.stt_pool.submit(self._run_pipeline, job, audio, speakers)
-
-    def resummarize(self, job: Job, *, llm: str, names: Optional[str], context: Optional[str]) -> None:
-        self._update(
-            job, status="queued", stage="회의록 재생성 대기", error=None, finished_at=None,
-            llm=llm, names=names, context=context,
-        )
-        self.llm_pool.submit(self._run_minutes_only, job)
-
-    def reanalyze(self, job: Job, *, names: Optional[str]) -> None:
-        self._update(job, analysis_status="running", analysis_error=None, names=names)
-        self.llm_pool.submit(self._guarded_analysis, job, self._load_turns(job))
-
-    def recorrect(self, job: Job) -> None:
-        """Correct the transcript, then refresh the analysis on the corrected text."""
-        self._update(job, correction_status="running", correction_error=None, analysis_status="running",
-                     analysis_error=None)
-        self.llm_pool.submit(self._run_correction_then_analysis, job)
-
-    def set_speaker_map(self, job: Job, mapping: dict[str, str]) -> None:
-        self._update(job, speaker_map=mapping)
-
-    @staticmethod
-    def _load_turns(job: Job, *, original: bool = False) -> list[mm.Turn]:
-        """Corrected text when there is one; speakers and timings are the same either way."""
-        corrected = job.out_dir / "transcript_corrected.json"
-        path = job.out_dir / "transcript.json" if original or not corrected.exists() else corrected
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [mm.Turn(**t) for t in data["turns"]]
-
-    def _run_pipeline(self, job: Job, audio: Path, speakers: Optional[int]) -> None:
-        try:
-            self._update(job, status="running")
-            segments = mm.transcribe_and_diarize(
-                audio,
-                asr_model=mm.DEFAULT_ASR_MODEL,
-                language="ko",
-                batch_size=8,
-                compute_type="int8",
-                num_speakers=speakers,
-                min_speakers=None,
-                max_speakers=None,
-                diarize_device="cpu",
-                vocab=job.vocab,
-                on_progress=lambda m: self._progress(job, m),
-            )
-            turns = mm.segments_to_turns(segments)
-            mm.save_transcript_json(turns, job.out_dir, source=job.filename)
-            mm.save_transcript_md(turns, job.out_dir)
-            self._update(job, speakers=sorted({t.speaker for t in turns}))
-            if job.correct:
-                turns = self._correct(job, turns)
-            self._update(job, analysis_status="running")
-            self._progress(job, f"대화 분석({job.analysis_llm})·회의록({job.llm}) 작성 중")
-            analysis: Future[None] = self.llm_pool.submit(self._guarded_analysis, job, turns)
-            self._write_minutes(job, turns)
-            analysis.result()  # keep the STT slot until the analysis lands, so "완료" means both are done
-            self._update(job, status="done", stage="완료", finished_at=time.time())
-        except BaseException as e:  # noqa: BLE001 - surface every failure on the job, incl. SystemExit
-            self._fail(job, e)
-
-    def _run_minutes_only(self, job: Job) -> None:
-        try:
-            self._update(job, status="running")
-            self._write_minutes(job, self._load_turns(job))
-            self._update(job, status="done", stage="완료", finished_at=time.time())
-        except BaseException as e:  # noqa: BLE001
-            self._fail(job, e)
-
-    def _write_minutes(self, job: Job, turns: list[mm.Turn]) -> None:
-        t0 = time.monotonic()
-        minutes = mm.write_minutes(
-            turns, llm=job.llm, names=job.names, context=job.context, vocab=job.vocab,
-            env_file=self.env_file, speaker_map=job.speaker_map,
-        )
-        (job.out_dir / "minutes.md").write_text(minutes, encoding="utf-8")
-        self._progress(job, f"회의록 완료 ({job.llm}, {time.monotonic() - t0:.0f}s)")
-
-    def _correct(self, job: Job, turns: list[mm.Turn]) -> list[mm.Turn]:
-        """Returns corrected turns, or the originals if correction fails (shown on the job, not fatal)."""
-        self._update(job, correction_status="running", correction_error=None)
-        self._progress(job, f"녹취록 보정 중 ({job.analysis_llm})")
-        try:
-            t0 = time.monotonic()
-            result = mm.correct_transcript(
-                turns, llm=job.analysis_llm, names=job.names, context=job.context, vocab=job.vocab,
-                env_file=self.env_file,
-            )
-            mm.save_correction(result, job.out_dir)
-            self._progress(job, f"녹취록 보정 완료 ({len(result['changes'])}턴, {time.monotonic() - t0:.0f}s)")
-            self._update(job, correction_status="done")
-            return [mm.Turn(**t) for t in result["turns"]]
-        except BaseException as e:  # noqa: BLE001
-            traceback.print_exception(e)
-            self._update(job, correction_status="error", correction_error=_error_text(e))
-            return turns
-
-    def _run_correction_then_analysis(self, job: Job) -> None:
-        turns = self._correct(job, self._load_turns(job, original=True))
-        self._guarded_analysis(job, turns)
-
-    def _guarded_analysis(self, job: Job, turns: list[mm.Turn]) -> None:
-        """Analysis is an add-on: its failure is shown on the job but never fails the minutes."""
-        try:
-            t0 = time.monotonic()
-            analysis = mm.analyze_transcript(
-                turns, llm=job.analysis_llm, names=job.names, context=job.context, env_file=self.env_file
-            )
-            (job.out_dir / "analysis.json").write_text(
-                json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            self._progress(job, f"대화 분석 완료 ({job.analysis_llm}, {time.monotonic() - t0:.0f}s)")
-            self._update(job, analysis_status="done")
-        except BaseException as e:  # noqa: BLE001
-            traceback.print_exception(e)
-            self._update(job, analysis_status="error", analysis_error=_error_text(e))
-
-
 def _clean(value: Optional[str]) -> Optional[str]:
     value = (value or "").strip()
     return value or None
@@ -351,6 +59,18 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
     app = FastAPI(title="meeting-minutes", docs_url=None, redoc_url=None)
     app.state.store = store
 
+    @app.middleware("http")
+    async def same_origin_only(request: Request, call_next: Any) -> Any:
+        """Changes (install an agent, write a profile, delete a job) must come from this page, not another site."""
+        origin = request.headers.get("origin")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and origin and urlparse(origin).netloc != request.headers.get("host"):
+            return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+        return await call_next(request)
+
+    @app.exception_handler(JobNotFound)
+    def job_not_found(_request: Any, _exc: JobNotFound) -> JSONResponse:
+        return JSONResponse({"detail": "job not found"}, status_code=404)
+
     def check_llm(llm: str) -> None:
         try:
             mm.resolve_llm(llm)
@@ -367,10 +87,15 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
 
     @app.get("/api/config")
     def config() -> dict[str, Any]:
-        return {"llms": mm.llm_choices(), "default_llm": mm.default_llm(), "analysis_llm": store.analysis_llm}
+        return {
+            "llms": mm.llm_choices(), "default_llm": mm.default_llm(), "analysis_llm": store.analysis_llm,
+            "profiles": [p.summary() for p in load_profiles().values()], "default_profile": "meeting",
+            "home": str(store.out_root.resolve()), "user_profile_dir": str(manage.USER_PROFILE_DIR),
+        }
 
     @app.get("/api/jobs")
     def list_jobs() -> list[dict[str, Any]]:
+        store.rescan()
         jobs = sorted(store.jobs.values(), key=lambda j: j.created_at, reverse=True)
         return [j.summary() for j in jobs]
 
@@ -382,10 +107,18 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         context: Annotated[Optional[str], Form()] = None,
         vocab: Annotated[Optional[str], Form()] = None,
         llm: Annotated[Optional[str], Form()] = None,
-        correct: Annotated[bool, Form()] = True,
+        correct: Annotated[Optional[bool], Form()] = None,
+        profile: Annotated[str, Form()] = "meeting",
+        language: Annotated[Optional[str], Form()] = "ko",
+        diarize: Annotated[Optional[bool], Form()] = None,
+        local_only: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         llm = llm or mm.default_llm()
         check_llm(llm)
+        try:
+            chosen = get_profile(profile)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
         if speakers is not None and not 1 <= speakers <= 20:
             raise HTTPException(400, "speakers must be between 1 and 20")
         job_id = uuid.uuid4().hex[:12]
@@ -397,14 +130,38 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
             shutil.copyfileobj(file.file, f)
         job = Job(
             id=job_id, filename=filename, out_dir=out_dir, llm=llm, analysis_llm=store.analysis_llm,
-            names=_clean(names), context=_clean(context), vocab=_clean(vocab), correct=correct,
+            names=_clean(names), context=_clean(context), vocab=_clean(vocab),
+            correct=chosen.correct if correct is None else correct,
+            profile=chosen.id, language=None if (language or "ko") == "auto" else _clean(language) or "ko",
+            diarize=diarize, local_only=local_only,
         )
         store.submit(job, audio, speakers)
         return job.summary()
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
+        store.rescan()
         return store.get(job_id).summary()
+
+    @app.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict[str, str]:
+        try:
+            store.delete(store.get(job_id))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"deleted": job_id}
+
+    @app.put("/api/jobs/{job_id}/document")
+    def put_document(job_id: str, body: Annotated[dict[str, str], Body()]) -> dict[str, Any]:
+        """Store a document written elsewhere (pasted from an agent); shown like one the app wrote."""
+        job = store.get(job_id)
+        text = (body.get("markdown") or "").strip()
+        if not text:
+            raise HTTPException(400, "markdown is empty")
+        if job.status in ("queued", "running"):
+            raise HTTPException(409, "job is still running")
+        store.save_document(job, text + "\n")
+        return job.summary()
 
     @app.post("/api/jobs/{job_id}/minutes")
     def regenerate_minutes(
@@ -462,12 +219,66 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         media = "application/json" if name.endswith(".json") else "text/markdown; charset=utf-8"
         return FileResponse(path, media_type=media, filename=name if download else None)
 
+    @app.get("/api/jobs/{job_id}/prompt")
+    def get_prompt(job_id: str) -> dict[str, Any]:
+        """The prompt an external agent (Claude Code, Codex...) can follow to write the same document."""
+        job = store.get(job_id)
+        require_transcript(job)
+        chosen = job._profile()
+        user = mm.build_user_prompt(
+            store._load_turns(job), names=job.names, context=job.context, vocab=job.vocab,
+            speaker_map=job.speaker_map, profile=chosen,
+        )
+        return {"profile": chosen.id, "document": chosen.document, "system": chosen.system, "user": user}
+
     @app.get("/api/jobs/{job_id}/audio")
     def get_audio(job_id: str) -> FileResponse:
         path = store.get(job_id).audio_path()
         if path is None:
             raise HTTPException(404, "no audio")
         return FileResponse(path, media_type=AUDIO_TYPES.get(path.suffix, "application/octet-stream"))
+
+    # ---------- agents and profiles ----------
+
+    @app.get("/api/agents")
+    def agents() -> dict[str, Any]:
+        home = store.out_root.resolve()
+        return {
+            "agents": manage.agent_status(), "home": str(home), "mcp_config": manage.mcp_config(home),
+            "steps": {t: manage.install_steps(t, home) for t in manage.TARGETS},
+        }
+
+    @app.post("/api/agents/{target}/install")
+    def install_agent(target: str) -> dict[str, Any]:
+        """Register the MCP server and skill with this PC's Claude Code / Codex, sharing this UI's job folder."""
+        try:
+            return manage.install_agent(target, store.out_root.resolve())
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except (RuntimeError, OSError) as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/profiles/{profile_id}")
+    def profile_detail(profile_id: str) -> dict[str, Any]:
+        try:
+            return manage.profile_detail(profile_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/profiles")
+    def save_profile(body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        try:
+            return manage.save_profile(body)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.delete("/api/profiles/{profile_id}")
+    def delete_profile(profile_id: str) -> dict[str, str]:
+        try:
+            manage.delete_profile(profile_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"deleted": profile_id}
 
     return app
 

@@ -18,18 +18,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
-import time
-import warnings
-import zlib
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_ASR_MODEL = "large-v3-turbo"
+from voicekit.agent_cli import AGENTS, complete_via_agent
+from voicekit.local import (  # noqa: F401 - re-exported: tests and callers use these as meeting_minutes.*
+    COMPRESSION_RATIO_THRESHOLD,
+    DEFAULT_ASR_MODEL,
+    UNKNOWN_SPEAKER,
+    UNREADABLE,
+    _repair_segments,
+    collapse_repeats,
+    compression_ratio,
+    is_repetition_loop,
+    is_sparse_segment,
+    segments_to_turns,
+    transcribe_and_diarize,
+)
+from voicekit.profiles import Profile, get_profile, with_profile
+from voicekit.types import Turn, render_transcript
+from voicekit.types import fmt_ts as _fmt_ts
+from voicekit.types import log as _log
+
 CLAUDE_MODEL = "claude-opus-5-5"
 # Overridable per install through `default` / `analysis_default` in llm.toml.
 DEFAULT_LLM = "claude"
@@ -45,308 +58,13 @@ OPENAI_COMPAT_PROVIDERS: dict[str, tuple[Optional[str], Optional[str]]] = {
     "compat": (None, "LLM_API_KEY"),  # any other OpenAI-compatible server; URL from LLM_BASE_URL
 }
 # Short names that work without any config file.
-BUILTIN_LLMS = {"claude": f"anthropic:{CLAUDE_MODEL}", "gpt": "openai:gpt-5.2"}
-UNKNOWN_SPEAKER = "SPEAKER_??"
-
-# pyannote warns that torchcodec can't load FFmpeg; we hand it in-memory audio, so it is never used.
-warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly")
-# pyannote's stats pooling warns on very short speech frames; the embedding is still produced.
-warnings.filterwarnings("ignore", message=r"std\(\): degrees of freedom is <= 0")
+# `claude-code` / `codex` hand the prompt to the local agent CLI (voicekit.agent_cli): no API key, uses its login.
+BUILTIN_LLMS = {
+    "claude": f"anthropic:{CLAUDE_MODEL}", "gpt": "openai:gpt-5.2", "claude-code": "cli:claude", "codex": "cli:codex",
+}
 
 
-@dataclass
-class Turn:
-    """One continuous stretch of speech by a single speaker."""
-
-    speaker: str
-    start: float
-    end: float
-    text: str
-
-
-def _log(msg: str) -> None:
-    print(f"[meeting-minutes] {msg}", file=sys.stderr, flush=True)
-
-
-def _fmt_ts(seconds: float) -> str:
-    s = int(seconds)
-    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
-
-
-# Whisper's own hallucination test: a ~30s segment whose text compresses too well is a repetition loop.
-COMPRESSION_RATIO_THRESHOLD = 2.4
-UNREADABLE = "[인식 불가]"
-# A decoder loop repeats a 1-5 word unit back to back. Single words need more repeats ("네 네 네 네" is speech).
-_LOOP_MAX_UNIT = 5
-_LOOP_MIN_REPEATS = {1: 5}
-_LOOP_MIN_REPEATS_DEFAULT = 4
-# Loops inside one word ("중독독독독독독독") show up as a syllable repeated many times.
-_CHAR_LOOP_RE = re.compile(r"(\w)\1{5,}")
-
-
-def compression_ratio(text: str) -> float:
-    data = text.encode("utf-8")
-    return len(data) / len(zlib.compress(data)) if data else 0.0
-
-
-def _find_loops(words: list[str]) -> list[tuple[int, int, int]]:
-    """(start, unit, repeats) for each back-to-back repetition run, punctuation ignored."""
-    keys = [w.strip(".,!?~") for w in words]
-    runs, i = [], 0
-    while i < len(words):
-        best = None
-        for n in range(1, _LOOP_MAX_UNIT + 1):
-            unit = keys[i : i + n]
-            if len(unit) < n or not all(unit):
-                break
-            k = 1
-            while keys[i + k * n : i + (k + 1) * n] == unit:
-                k += 1
-            if k >= _LOOP_MIN_REPEATS.get(n, _LOOP_MIN_REPEATS_DEFAULT) and (not best or k * n > best[2] * best[1]):
-                best = (i, n, k)
-        if best:
-            runs.append(best)
-            i = best[0] + best[1] * best[2]
-        else:
-            i += 1
-    return runs
-
-
-def is_repetition_loop(text: str) -> bool:
-    return bool(_find_loops(text.split()) or _CHAR_LOOP_RE.search(text))
-
-
-def collapse_repeats(text: str) -> str:
-    """Drop the repeats of a loop. A looping single token ("Q Q Q") is noise and becomes a marker;
-    a looping phrase keeps its first occurrence, which is usually what was really said."""
-    words = text.split()
-    out, i = [], 0
-    for start, n, k in _find_loops(words):
-        out += words[i:start]
-        out += [UNREADABLE] if n == 1 else words[start : start + n]
-        i = start + n * k
-    out += words[i:]
-    return _CHAR_LOOP_RE.sub(lambda m: m.group(1) + UNREADABLE, " ".join(out))
-
-
-# Batched decoding can also skip most of a window and emit only its last sentence(s); the aligner then
-# pins that text to the start of the window, so the lost speech also shifts the speaker. Real speech
-# runs 5-8 non-space chars/s in Korean (more in English), so a long segment far below that was cut short.
-_SPARSE_MIN_SECONDS = 8.0
-_SPARSE_MAX_CHARS_PER_SECOND = 2.5
-
-
-def _chars(text: str) -> int:
-    return len("".join(text.split()))
-
-
-def is_sparse_segment(seg: dict[str, Any]) -> bool:
-    duration = seg["end"] - seg["start"]
-    return duration >= _SPARSE_MIN_SECONDS and _chars(seg["text"]) / duration < _SPARSE_MAX_CHARS_PER_SECOND
-
-
-def _repair_segments(
-    model: Any, audio: Any, segments: list[dict[str, Any]], *, language: str, vocab: Optional[str],
-    log: Callable[[str], None],
-) -> list[dict[str, Any]]:
-    """Re-decode broken segments without batching, where faster-whisper's temperature fallback applies.
-
-    WhisperX's batched decoding has no compression-ratio fallback, so a decoder that falls into a
-    loop ("Q. Q. Q. ...") keeps it and swallows the real speech under it; whatever still loops after
-    the retry is collapsed to a marker rather than shown as text. Segments with far too little text
-    for their length (skipped speech) are retried too, and the retry wins only if it recovers more.
-    """
-    sr = 16000
-    out = []
-    for seg in segments:
-        text = seg["text"]
-        looping = is_repetition_loop(text) or len(text) > 40 and compression_ratio(text) > COMPRESSION_RATIO_THRESHOLD
-        sparse = not looping and is_sparse_segment(seg)
-        if not (looping or sparse):
-            out.append(seg)
-            continue
-        clip = audio[int(seg["start"] * sr) : int(seg["end"] * sr)]
-        pieces, _ = model.model.transcribe(
-            clip, language=language, beam_size=5, condition_on_previous_text=False,
-            compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD, initial_prompt=vocab, vad_filter=False,
-        )
-        redone = " ".join(p.text.strip() for p in pieces).strip()
-        if sparse:
-            better = _chars(redone) > _chars(text) and not is_repetition_loop(redone)
-            log(f"sparse segment at {_fmt_ts(seg['start'])} re-decoded ({_chars(text)} -> {_chars(redone)} chars"
-                + ("" if better else ", kept original") + ")")
-            out.append({**seg, "text": redone} if better else seg)
-            continue
-        fixed = collapse_repeats(redone) if redone else UNREADABLE
-        log(f"repetition loop at {_fmt_ts(seg['start'])} re-decoded" + (" (still looping, collapsed)" if fixed != redone else ""))
-        out.append({**seg, "text": fixed})
-    return out
-
-
-def transcribe_and_diarize(
-    audio_path: Path,
-    *,
-    asr_model: str,
-    language: Optional[str],
-    batch_size: int,
-    compute_type: str,
-    num_speakers: Optional[int],
-    min_speakers: Optional[int],
-    max_speakers: Optional[int],
-    diarize_device: str,
-    vocab: Optional[str],
-    on_progress: Optional[Callable[[str], None]] = None,
-) -> list[dict[str, Any]]:
-    """Run WhisperX ASR, word alignment and pyannote diarization.
-
-    Returns WhisperX segments, each carrying a ``speaker`` key when one could be assigned.
-    ``on_progress`` receives each stage's log line (the web UI shows it as job status).
-    """
-    log = on_progress or _log
-    import whisperx
-    from huggingface_hub.errors import GatedRepoError
-    from whisperx.diarize import DiarizationPipeline, assign_word_speakers
-
-    # ctranslate2 has no MPS backend, so ASR and alignment run on CPU on Apple Silicon.
-    device = "cpu"
-    audio = whisperx.load_audio(str(audio_path))
-    log(f"audio loaded: {_fmt_ts(len(audio) / 16000)}")
-
-    log("ASR running")
-    t0 = time.monotonic()
-    # Domain terms in the initial prompt bias Whisper toward the right spelling (e.g. "QA" not "카").
-    asr_options = {"initial_prompt": vocab} if vocab else None
-    model = whisperx.load_model(
-        asr_model, device, compute_type=compute_type, language=language, asr_options=asr_options
-    )
-    result = model.transcribe(audio, batch_size=batch_size, language=language)
-    lang = result["language"]
-    result["segments"] = _repair_segments(
-        model, audio, result["segments"], language=lang, vocab=vocab, log=log
-    )
-    log(f"ASR done ({lang}, {len(result['segments'])} segments, {time.monotonic() - t0:.0f}s)")
-    del model
-
-    log("alignment running")
-    t0 = time.monotonic()
-    align_model, metadata = whisperx.load_align_model(language_code=lang, device=device)
-    result = whisperx.align(result["segments"], align_model, metadata, audio, device)
-    log(f"alignment done ({time.monotonic() - t0:.0f}s)")
-    del align_model
-
-    log("diarization running")
-    t0 = time.monotonic()
-    try:
-        diarizer = DiarizationPipeline(token=os.environ.get("HF_TOKEN"), device=diarize_device)
-    except GatedRepoError as e:
-        raise SystemExit(
-            "pyannote 화자분리 모델은 사용 동의가 필요합니다.\n"
-            "  1) https://huggingface.co/pyannote/speaker-diarization-community-1 에서 동의\n"
-            "  2) `hf auth login` 하거나 HF_TOKEN 환경변수 설정"
-        ) from e
-    diarize_df = diarizer(
-        audio,
-        num_speakers=num_speakers,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-    )
-    result = assign_word_speakers(diarize_df, result)
-    speakers = sorted(set(diarize_df["speaker"]))
-    log(f"diarization done ({len(speakers)} speakers, {time.monotonic() - t0:.0f}s)")
-    return list(result["segments"])
-
-
-def segments_to_turns(segments: list[dict[str, Any]], max_gap: float = 2.0) -> list[Turn]:
-    """Merge consecutive segments of the same speaker into turns.
-
-    Segments are split per word speaker first, because a single Whisper segment
-    often spans a speaker change.
-    """
-    pieces: list[Turn] = []
-    for seg in segments:
-        words = seg.get("words") or []
-        timed = [w for w in words if "start" in w and "end" in w]
-        if not timed:
-            pieces.append(
-                Turn(seg.get("speaker", UNKNOWN_SPEAKER), seg["start"], seg["end"], seg["text"].strip())
-            )
-            continue
-        current: Optional[Turn] = None
-        for w in words:
-            # Untimed words (digits, symbols) inherit the running speaker.
-            speaker = w.get("speaker") or (current.speaker if current else seg.get("speaker", UNKNOWN_SPEAKER))
-            start = w.get("start", current.end if current else seg["start"])
-            end = w.get("end", start)
-            if current and current.speaker == speaker:
-                current.text += " " + w["word"]
-                current.end = end
-            else:
-                if current:
-                    pieces.append(current)
-                current = Turn(speaker, start, end, w["word"])
-        if current:
-            pieces.append(current)
-
-    turns: list[Turn] = []
-    for p in pieces:
-        if turns and turns[-1].speaker == p.speaker and p.start - turns[-1].end <= max_gap:
-            turns[-1].text += " " + p.text
-            turns[-1].end = p.end
-        else:
-            turns.append(Turn(p.speaker, p.start, p.end, p.text.strip()))
-    for t in turns:
-        t.text = " ".join(t.text.split())
-    return [t for t in turns if t.text]
-
-
-def render_transcript(turns: list[Turn]) -> str:
-    """Render turns as a Markdown transcript, one line per turn."""
-    lines = ["# 화자별 녹취록", ""]
-    for t in turns:
-        lines.append(f"**[{_fmt_ts(t.start)}] {t.speaker}**: {t.text}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-MINUTES_SYSTEM = """\
-당신은 한국 기업의 회의록을 정리하는 서기입니다. 화자분리된 녹취록을 받아 회의록을 작성합니다.
-
-녹취록 특성:
-- 화자 라벨(SPEAKER_00 등)은 음성 분석으로 자동으로 붙인 것이라 한두 문장 단위로 틀릴 수 있습니다.
-- 음성 인식 오류(동음이의어, 고유명사·숫자 오인식)가 섞여 있습니다. 문맥상 명백한 것만 바로잡고, 애매하면 원문 표기를 유지하세요.
-
-작성 규칙:
-- 녹취록에 없는 내용을 지어내지 마세요. 결정되지 않은 것을 결정사항으로 쓰지 마세요.
-- 화자 표에는 녹취록에 실제로 나오는 라벨만 씁니다. 라벨을 새로 만들지 마세요.
-- 화자 이름은 그 화자가 스스로 이름을 밝히거나, 누군가 이름을 불러 질문한 직후 그 화자가 답한 경우에만 붙이고, 근거 발화를 화자 표에 적으세요.
-  발화 속에서 언급된 사람(제3자)을 말하는 사람으로 착각하지 마세요. 근거가 없으면 이름 칸을 "미상"으로 두고 역할(진행자 등)만 적습니다.
-- 담당자는 "제가 하겠다"고 말한 화자의 라벨(또는 확인된 이름)로 적으세요.
-- 참석자 이름 후보가 주어지면 그 안에서 매칭하되, 근거가 약하면 매칭하지 마세요.
-- 각 항목에 근거가 되는 타임스탬프를 [HH:MM:SS] 형식으로 붙이세요.
-
-출력 형식 (Markdown, 이 순서 그대로):
-
-# 회의록: <회의 주제 한 줄>
-
-## 참석자 (화자 매핑)
-| 화자 라벨 | 추정 이름/역할 | 근거 |
-
-## 요약
-3~5문장.
-
-## 안건별 논의
-### 1. <안건>
-- 누가 어떤 입장이었는지 화자를 밝혀서 정리
-
-## 결정사항
-- 결정 내용 [타임스탬프]
-
-## 액션 아이템
-| 할 일 | 담당 | 기한 | 근거 |
-(담당·기한이 언급되지 않았으면 "미정")
-
-## 미결 사항 / 후속 논의 필요
-"""
+MINUTES_SYSTEM = get_profile("meeting").system
 
 
 def build_user_prompt(
@@ -356,8 +74,10 @@ def build_user_prompt(
     context: Optional[str],
     vocab: Optional[str],
     speaker_map: Optional[dict[str, str]] = None,
+    profile: Optional[Profile] = None,
 ) -> str:
     """Assemble the user turn: speaker labels, optional hints, then the transcript."""
+    profile = profile or get_profile()
     labels = sorted({t.speaker for t in turns})
     hints = [f"녹취록의 화자 라벨 ({len(labels)}개): {', '.join(labels)}"]
     confirmed = {k: v for k, v in (speaker_map or {}).items() if k in labels and v}
@@ -365,9 +85,9 @@ def build_user_prompt(
         pairs = ", ".join(f"{k}={v}" for k, v in sorted(confirmed.items()))
         hints.append(f"사용자가 확인한 화자 이름 (근거 없이 그대로 사용): {pairs}")
     if names:
-        hints.append(f"참석자 이름 후보: {names}")
+        hints.append(f"{profile.names_label}: {names}")
     if context:
-        hints.append(f"회의 배경: {context}")
+        hints.append(f"{profile.context_label}: {context}")
     if vocab:
         hints.append(
             f"용어 목록: {vocab}\n"
@@ -446,7 +166,7 @@ def resolve_llm(name: str) -> LLMSpec:
     if name in models:
         m = models[name]
         provider = str(m.get("provider") or "compat")
-        if provider != "anthropic" and provider not in OPENAI_COMPAT_PROVIDERS:
+        if provider not in ("anthropic", "cli") and provider not in OPENAI_COMPAT_PROVIDERS:
             raise ValueError(f"llm.toml models.{name}: unknown provider {provider!r}")
         if not m.get("model"):
             raise ValueError(f"llm.toml models.{name}: model is required")
@@ -457,12 +177,14 @@ def resolve_llm(name: str) -> LLMSpec:
     if name in BUILTIN_LLMS:
         return resolve_llm(BUILTIN_LLMS[name])
     provider, sep, model = name.partition(":")
+    if sep and provider == "cli" and model.split(":")[0] in AGENTS:
+        return LLMSpec(name=name, provider="cli", model=model)  # cli:claude, cli:codex:gpt-5.2
     if sep and model and (provider == "anthropic" or provider in OPENAI_COMPAT_PROVIDERS):
         return LLMSpec(name=name, provider=provider, model=model, reasoning=provider == "openai")
     known = ", ".join([*models, *BUILTIN_LLMS])
     raise ValueError(
         f"unknown llm {name!r}: use one of [{known}] or provider:model "
-        f"(providers: anthropic, {', '.join(OPENAI_COMPAT_PROVIDERS)})"
+        f"(providers: anthropic, cli:claude, cli:codex, {', '.join(OPENAI_COMPAT_PROVIDERS)})"
     )
 
 
@@ -600,14 +322,21 @@ def write_minutes(
     vocab: Optional[str],
     env_file: Optional[Path],
     speaker_map: Optional[dict[str, str]] = None,
+    profile: Optional[Profile] = None,
 ) -> str:
-    """Build the prompt from turns and return the minutes from the chosen LLM."""
-    user = build_user_prompt(turns, names=names, context=context, vocab=vocab, speaker_map=speaker_map)
-    return _complete(user, system=MINUTES_SYSTEM, llm=llm, env_file=env_file)
+    """Build the prompt from turns and return the document (minutes, interview notes...) from the chosen LLM."""
+    profile = profile or get_profile()
+    user = build_user_prompt(
+        turns, names=names, context=context, vocab=vocab, speaker_map=speaker_map, profile=profile
+    )
+    return _complete(user, system=profile.system, llm=llm, env_file=env_file)
 
 
 def _complete(user: str, *, system: str, llm: str, env_file: Optional[Path]) -> str:
     spec = resolve_llm(llm)
+    if spec.provider == "cli":
+        agent, _, model = spec.model.partition(":")
+        return complete_via_agent(user, system=system, agent=agent, model=model or None)
     if spec.provider == "anthropic":
         return minutes_via_claude(user, system=system, model=spec.model, env_file=env_file)
     return complete_openai_compat(user, spec=spec, env_file=env_file, system=system)
@@ -655,13 +384,15 @@ def _correction_chunks(turns: list[Turn]) -> list[tuple[int, int]]:
 
 
 def build_correction_prompt(
-    turns: list[Turn], lo: int, hi: int, *, names: Optional[str], context: Optional[str], vocab: Optional[str]
+    turns: list[Turn], lo: int, hi: int, *, names: Optional[str], context: Optional[str], vocab: Optional[str],
+    profile: Optional[Profile] = None,
 ) -> str:
+    profile = profile or get_profile()
     hints = []
     if context:
-        hints.append(f"회의 배경: {context}")
+        hints.append(f"{profile.context_label}: {context}")
     if names:
-        hints.append(f"참석자 이름 후보: {names}")
+        hints.append(f"{profile.names_label}: {names}")
     if vocab:
         hints.append(f"용어 목록: {vocab}")
 
@@ -694,6 +425,7 @@ def correct_transcript(
     context: Optional[str],
     vocab: Optional[str],
     env_file: Optional[Path],
+    profile: Optional[Profile] = None,
 ) -> dict[str, Any]:
     """Context-aware STT error correction; speakers and timings never change, only turn text.
 
@@ -708,8 +440,8 @@ def correct_transcript(
     def run(chunk: tuple[int, int]) -> dict[int, str]:
         lo, hi = chunk
         reply = _complete(
-            build_correction_prompt(base, lo, hi, names=names, context=context, vocab=vocab),
-            system=CORRECTION_SYSTEM, llm=llm, env_file=env_file,
+            build_correction_prompt(base, lo, hi, names=names, context=context, vocab=vocab, profile=profile),
+            system=with_profile(CORRECTION_SYSTEM, profile), llm=llm, env_file=env_file,
         )
         out: dict[int, str] = {}
         for item in _extract_json(reply).get("turns") or []:
@@ -763,14 +495,17 @@ KEY_TURN_TYPES = {"decision", "action", "question", "issue"}
 UNKNOWN_NAME = "미상"
 
 
-def build_analysis_prompt(turns: list[Turn], *, names: Optional[str], context: Optional[str]) -> str:
+def build_analysis_prompt(
+    turns: list[Turn], *, names: Optional[str], context: Optional[str], profile: Optional[Profile] = None
+) -> str:
     """Numbered transcript so the model cites turn indexes, which we can validate, not timestamps."""
+    profile = profile or get_profile()
     labels = sorted({t.speaker for t in turns})
     hints = [f"화자 라벨 ({len(labels)}개): {', '.join(labels)}", f"턴 수: {len(turns)} (#0 ~ #{len(turns) - 1})"]
     if names:
-        hints.append(f"참석자 이름 후보: {names}")
+        hints.append(f"{profile.names_label}: {names}")
     if context:
-        hints.append(f"회의 배경: {context}")
+        hints.append(f"{profile.context_label}: {context}")
     lines = [f"#{i} [{_fmt_ts(t.start)}] {t.speaker}: {t.text}" for i, t in enumerate(turns)]
     return "\n".join(hints) + "\n\n<transcript>\n" + "\n".join(lines) + "\n</transcript>"
 
@@ -867,11 +602,12 @@ def analyze_transcript(
     names: Optional[str],
     context: Optional[str],
     env_file: Optional[Path],
+    profile: Optional[Profile] = None,
 ) -> dict[str, Any]:
     """Speaker-name probabilities, topic sections and key turns for the conversation view."""
     reply = _complete(
-        build_analysis_prompt(turns, names=names, context=context),
-        system=ANALYSIS_SYSTEM, llm=llm, env_file=env_file,
+        build_analysis_prompt(turns, names=names, context=context, profile=profile),
+        system=with_profile(ANALYSIS_SYSTEM, profile), llm=llm, env_file=env_file,
     )
     result = normalize_analysis(_extract_json(reply), turns)
     result["llm"] = llm
@@ -890,6 +626,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--asr-model", default=DEFAULT_ASR_MODEL, help=f"Whisper 모델 (기본: {DEFAULT_ASR_MODEL})")
     p.add_argument("--compute-type", default="int8", help="ctranslate2 연산 타입 (CPU: int8 권장)")
     p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument(
+        "--profile", default="meeting",
+        help="녹음 유형: meeting, interview, call, lecture, podcast, memo, general 또는 직접 만든 프로필 (`voicekit profiles`)",
+    )
+    p.add_argument("--no-diarize", action="store_true", help="화자분리 생략 (한 명이 말하는 녹음, 훨씬 빠름)")
     p.add_argument("--speakers", type=int, help="화자 수를 알면 지정 (정확도가 가장 크게 오름)")
     p.add_argument("--min-speakers", type=int)
     p.add_argument("--max-speakers", type=int)
@@ -928,6 +669,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.analysis_llm = args.analysis_llm or default_analysis_llm()
         resolve_llm(args.llm)
         resolve_llm(args.analysis_llm)
+        profile = get_profile(args.profile)
     except ValueError as e:
         parser.error(str(e))
     src: Path = args.input
@@ -947,7 +689,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             language=None if args.language == "auto" else args.language,
             batch_size=args.batch_size,
             compute_type=args.compute_type,
-            num_speakers=args.speakers,
+            num_speakers=args.speakers or profile.speakers,
+            diarize=profile.diarize and not args.no_diarize,
             min_speakers=args.min_speakers,
             max_speakers=args.max_speakers,
             diarize_device=args.diarize_device,
@@ -964,20 +707,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.correct:
         correction = correct_transcript(
             turns, llm=args.analysis_llm, names=args.names, context=args.context, vocab=args.vocab,
-            env_file=args.env_file,
+            env_file=args.env_file, profile=profile,
         )
         save_correction(correction, out_dir)
         turns = [Turn(**t) for t in correction["turns"]]
         _log(f"corrected {len(correction['changes'])} turns -> {out_dir / 'transcript_corrected.md'}")
     _log(f"writing minutes with {args.llm} (transcript text only is sent)")
     minutes = write_minutes(
-        turns, llm=args.llm, names=args.names, context=args.context, vocab=args.vocab, env_file=args.env_file
+        turns, llm=args.llm, names=args.names, context=args.context, vocab=args.vocab, env_file=args.env_file,
+        profile=profile,
     )
     (out_dir / "minutes.md").write_text(minutes, encoding="utf-8")
     _log(f"minutes -> {out_dir / 'minutes.md'}")
     if args.analyze:
         analysis = analyze_transcript(
-            turns, llm=args.analysis_llm, names=args.names, context=args.context, env_file=args.env_file
+            turns, llm=args.analysis_llm, names=args.names, context=args.context, env_file=args.env_file,
+            profile=profile,
         )
         (out_dir / "analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
         _log(f"analysis -> {out_dir / 'analysis.json'}")

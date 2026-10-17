@@ -93,7 +93,7 @@ def upload(c: TestClient, **form: str) -> dict[str, Any]:
 def test_index_served(client: TestClient) -> None:
     r = client.get("/")
     assert r.status_code == 200
-    assert "회의록 만들기" in r.text
+    assert "음성 녹취·정리" in r.text
 
 
 def test_upload_runs_pipeline_and_serves_files(client: TestClient, stubs: dict[str, Any]) -> None:

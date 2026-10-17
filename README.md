@@ -1,9 +1,11 @@
 # meeting-minutes
 
-녹음 파일 하나로 **화자별 녹취록**과 **회의록**을 만드는 로컬 도구입니다. [English](README.en.md)
+녹음 파일 하나로 **화자별 녹취록**과 **정리 문서**(회의록, 인터뷰 정리, 상담 요약, 강의 노트 등)를 만드는 로컬 도구입니다. [English](README.en.md)
 
 - 음성 인식, 단어 정렬, 화자 분리는 전부 내 PC에서 돕니다 (WhisperX + pyannote).
 - 회의록, 녹취록 보정, 대화 분석에는 LLM을 씁니다. Claude, OpenAI, Gemini, OpenRouter, 그리고 Ollama·vLLM·사내 게이트웨이 같은 OpenAI 호환 서버면 무엇이든 연결할 수 있습니다. Ollama를 쓰면 처음부터 끝까지 외부로 나가는 데이터가 없습니다.
+- 녹음 유형(회의, 인터뷰, 상담, 강의, 팟캐스트, 음성 메모, 기타)마다 정리 문서 양식이 다르고, 직접 추가할 수 있습니다.
+- 로컬 처리 부분은 **스킬과 MCP 서버**로도 쓸 수 있어서 Claude Code, Codex 같은 에이전트에 붙이면 에이전트가 직접 녹취하고 문서를 씁니다. 반대로 이 도구가 문서 작성만 로컬 `claude`, `codex` CLI에 넘길 수도 있습니다 (API 키 불필요).
 - 브라우저 화면에서 업로드하고, 대화 흐름(주제 구간, 화자 타임라인, 핵심 발화)과 회의록을 봅니다. 발화를 누르면 그 시점부터 원본 음성이 재생됩니다.
 
 ```
@@ -95,9 +97,13 @@ uv run meeting-minutes-web --env-file .env
 - **대화 흐름**: 주제 구간별 대화, 화자별 타임라인, 화자·검색·핵심 발화 필터, 결정/할 일/질문/이슈 표시.
 - **화자 카드**: 발화 비중, 이름 후보별 확률과 근거 발화. 이름을 확정하면 화면 전체와 이후 회의록에 반영됩니다.
 - **회의록**: 모델이나 이름 후보를 바꿔 다시 만들 수 있습니다.
+- **처리 방식**: 새 녹음에서 「녹취록만 만들기」를 고르면 LLM을 한 번도 부르지 않고 음성 인식·정렬·화자분리까지만 합니다. 문서는 나중에 모델을 골라 만들거나, 에이전트가 쓴 Markdown을 「문서로 저장」에 붙여넣어 채웁니다.
+- **에이전트 연결** (상단 버튼): Claude Code·Codex의 CLI 감지, MCP 등록, 스킬 설치 상태를 보고 버튼으로 연결합니다. 사용자 전역 설정을 바꾸므로 실행 전에 할 일을 보여주고 확인을 받습니다. 연결하면 이 화면의 작업 폴더(`--out-dir`)를 에이전트가 같이 쓰므로, 에이전트가 만든 녹취가 작업 목록에 나타나고 진행도 따라갑니다. 다른 MCP 에이전트용 설정 JSON도 복사할 수 있습니다.
+- **녹음 유형** (상단 버튼): 유형 보기, 새 유형 추가, 복제, 수정, 삭제. 저장하면 `~/.config/voicekit/profiles/<id>.toml` 이 생깁니다.
+- **작업 삭제**: 작업 머리의 「삭제」로 작업과 폴더를 지웁니다.
 
 > [!WARNING]
-> 웹 서버에는 인증이 없습니다. 기본값처럼 `127.0.0.1` 에만 열어 두고, `--host 0.0.0.0` 으로 다른 사람에게 열지 마세요.
+> 웹 서버에는 인증이 없습니다. 기본값처럼 `127.0.0.1` 에만 열어 두고, `--host 0.0.0.0` 으로 다른 사람에게 열지 마세요. 에이전트 설치·프로필 저장·작업 삭제 같은 변경 요청은 다른 사이트에서 온 것이면 거절합니다.
 
 산출물은 `out/web/<작업 id>/` 에 쌓이고, 서버를 다시 켜면 이 폴더에서 작업 목록을 다시 읽습니다.
 
@@ -141,10 +147,83 @@ uv run meeting-minutes out/meeting/transcript.json --llm gpt
 | `--language` | 기본 `ko`. `auto` 면 자동 감지 |
 | `--diarize-device mps` | pyannote를 Apple GPU로 (미측정, 불안정하면 기본값 `cpu`) |
 
+## 녹음 유형 (프로필)
+
+| id | 용도 | 문서 | 화자 분리 |
+|---|---|---|---|
+| `meeting` | 여러 명이 논의·결정하는 회의 | 회의록 | O |
+| `interview` | 인터뷰, 취재, 면담 | 인터뷰 정리 | O |
+| `call` | 고객 상담, 콜센터, 영업 통화 | 상담 요약 (개인정보 가림) | O |
+| `lecture` | 강의, 발표, 세미나 | 강의 노트 | X (빠름) |
+| `podcast` | 팟캐스트, 대담, 라디오 | 에피소드 노트 | O |
+| `memo` | 혼자 말로 남기는 메모 | 메모 정리 | X (빠름) |
+| `general` | 유형을 모를 때 | 음성 요약 | O |
+
+웹 화면은 업로드할 때 유형을 고르고, CLI는 `--profile interview`, 한 명만 말하는 녹음은 `--no-diarize` 로 화자 분리를 건너뜁니다. 한 명이 말하는 녹음은 가장 느린 단계(화자 분리)가 빠져서 훨씬 빨리 끝납니다. 음성 언어는 웹 화면 또는 `--language` 로 고르고, 단어 정렬 모델이 없는 언어는 문장 단위 시각으로 화자를 붙입니다.
+
+직접 만들려면 TOML 한 개면 됩니다. `./profiles/`, `~/.config/voicekit/profiles/`, `$VOICEKIT_PROFILES` 중 한 곳에 두면 같은 id의 내장 프로필보다 우선합니다.
+
+```toml
+# profiles/sales-call.toml
+label = "영업 통화"
+document = "영업 통화 노트"
+description = "고객과 하는 영업 통화"
+diarize = true
+analysis = false          # 대화 분석(화자 이름 확률, 주제 구간) 생략
+system_file = "sales-call.md"   # 또는 system = """...""" 로 직접
+```
+
+내장 양식은 [voicekit/profiles/](voicekit/profiles/) 를 보세요.
+
+## 에이전트에 붙이기 (스킬 · MCP)
+
+음성 인식, 단어 정렬, 화자 분리는 LLM이 필요 없으니 에이전트가 로컬 도구로 호출하고, 문서 작성은 에이전트가 자기 모델로 합니다.
+
+```bash
+uv sync --extra mcp
+uv run voicekit install claude            # 할 일만 출력 (dry run)
+uv run voicekit install claude --apply    # 스킬(~/.claude/skills/voicekit) + MCP 서버 등록
+uv run voicekit install codex --apply     # ~/.codex/AGENTS.md 에 안내 블록 + MCP 서버 등록
+```
+
+수동으로 등록하려면 `claude mcp add voicekit -- <이 저장소 .venv>/bin/python -m voicekit.mcp_server` (Codex는 `codex mcp add ...`).
+
+| MCP 도구 | 하는 일 |
+|---|---|
+| `list_profiles` | 녹음 유형 목록 |
+| `transcribe_audio` | 로컬 녹취 시작 (ASR + 단어 정렬 + 화자 분리), `job_id` 즉시 반환 |
+| `wait_for_job`, `job_status`, `list_jobs` | 진행 확인. 한 번에 최대 약 50초 대기 |
+| `read_transcript` | 녹취록을 페이지로 읽기 (`next_offset`) |
+| `get_document_prompt` | 프로필 양식의 system·user 프롬프트. 에이전트가 이걸로 직접 문서 작성 |
+| `save_document` | 작성한 문서를 작업에 저장 (웹 화면에 같이 보임) |
+| `generate_document` | 다른 모델(`claude-code`, `codex`, 별칭, `provider:model`)이 대신 작성 |
+| `set_speaker_names` | 화자 라벨에 이름 확정 |
+
+MCP 없이도 같은 흐름을 CLI로 쓸 수 있습니다 (스킬이 두 경로를 모두 안내합니다).
+
+```bash
+uv run voicekit transcribe meeting.m4a --profile interview --speakers 2 --vocab "QA,결제 모듈"
+uv run voicekit prompt <job> --names "김기자,박교수"      # 에이전트가 따라 쓸 프롬프트
+uv run voicekit save-document <job> < document.md
+```
+
+작업 폴더는 기본 `~/.voicekit/jobs` 입니다. 웹 화면에서 에이전트가 만든 작업을 보려면 같은 폴더를 가리키세요: `uv run meeting-minutes-web --out-dir ~/.voicekit/jobs`.
+
+## Claude Code, Codex에 문서 작성 맡기기
+
+모델 이름 `claude-code`, `codex` (또는 `cli:claude:opus`, `cli:codex:gpt-5.2`)를 고르면 로컬에 로그인된 CLI에 프롬프트를 넘겨 문서를 받아옵니다. API 키가 필요 없고, 웹 화면의 모델 목록과 `--llm` 에서 그대로 쓸 수 있습니다.
+
+```bash
+uv run meeting-minutes meeting.m4a --llm claude-code
+uv run voicekit handoff <job> --agent codex        # 이미 만든 녹취록에서 문서만
+```
+
+에이전트는 빈 임시 폴더에서 도구를 끈 채(Claude는 `--tools ""`, Codex는 `read-only` 샌드박스) 실행되어 프롬프트만 읽고 답합니다. 음성이나 작업 폴더는 보지 못합니다.
+
 ## 데이터가 어디로 가나요
 
-- 음성 파일은 PC 밖으로 나가지 않습니다. 모델 가중치만 처음에 Hugging Face에서 받습니다.
-- 고른 LLM 제공자에게는 **녹취록 텍스트**가 전송됩니다. 민감한 회의라면 `ollama:` 나 사내 서버를 쓰거나 `--no-summary` 로 녹취록만 만드세요.
+- 음성 파일은 PC 밖으로 나가지 않습니다 (MCP 서버가 읽어 주는 것도 텍스트뿐). 모델 가중치만 처음에 Hugging Face에서 받습니다.
+- 고른 LLM 제공자에게는 **녹취록 텍스트**가 전송됩니다. `claude-code`, `codex` 를 고르면 그 CLI가 연결된 서비스로, MCP로 붙인 에이전트는 그 에이전트의 모델로 갑니다. 민감한 회의라면 `ollama:` 나 사내 서버를 쓰거나 `--no-summary` 로 녹취록만 만드세요.
 - 웹 화면은 marked, DOMPurify를 cdnjs에서 불러옵니다 (회의 데이터는 보내지 않음).
 
 ## 성능 (Apple M4 Pro, CPU)
