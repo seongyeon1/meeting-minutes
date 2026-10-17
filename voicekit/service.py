@@ -24,6 +24,9 @@ DEFAULT_HOME = Path.home() / ".voicekit" / "jobs"
 READ_CHARS = 20000
 
 
+ONLY_JOB_ENV = "VOICEKIT_ONLY_JOB"
+
+
 def home() -> Path:
     """Job root. ``VOICEKIT_HOME`` lets the web UI (``--out-dir``) and agents share one folder."""
     return Path(os.environ.get("VOICEKIT_HOME") or DEFAULT_HOME).expanduser()
@@ -36,8 +39,13 @@ class Service:
         self.env_file = env_file or (Path(env) if env else None)
         self.store = JobStore(root or home(), self.env_file, mm.default_analysis_llm())
 
+    @staticmethod
+    def only_job() -> Optional[str]:
+        """Set when an agent was started from the web UI for one job: it may touch that job and nothing else."""
+        return os.environ.get(ONLY_JOB_ENV) or None
+
     def job(self, job_id: str) -> Job:
-        if not job_id or "/" in job_id or job_id.startswith("."):
+        if not job_id or "/" in job_id or job_id.startswith(".") or self.only_job() not in (None, job_id):
             raise JobNotFound(job_id)
         return self.store.get(job_id)
 
@@ -51,6 +59,8 @@ class Service:
         context: Optional[str] = None,
     ) -> dict[str, Any]:
         """Queue local transcription of an audio/video file; returns at once with the job id."""
+        if self.only_job():
+            raise RuntimeError("this session is limited to one existing job; starting new transcriptions is disabled")
         src = Path(path).expanduser()
         if not src.is_file():
             raise FileNotFoundError(f"audio file not found: {src}")
@@ -82,7 +92,9 @@ class Service:
         return job.summary()
 
     def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
-        jobs = sorted(self.store.jobs.values(), key=lambda j: j.created_at, reverse=True)[:limit]
+        only = self.only_job()
+        jobs = [j for j in self.store.jobs.values() if only in (None, j.id)]
+        jobs = sorted(jobs, key=lambda j: j.created_at, reverse=True)[:limit]
         keys = ("id", "filename", "profile", "status", "stage", "speakers", "has_minutes")
         return [{k: s[k] for k in keys} for s in (j.summary() for j in jobs)]
 

@@ -26,7 +26,8 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 import meeting_minutes as mm
-from voicekit import manage
+from voicekit import agent_cli, manage
+from voicekit.agent_run import PRESETS, AgentRunner
 from voicekit.jobs import Job, JobNotFound, JobStore
 from voicekit.profiles import get_profile, load_profiles
 
@@ -58,6 +59,8 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
     store = JobStore(out_root, env_file, analysis_llm or mm.default_analysis_llm())
     app = FastAPI(title="meeting-minutes", docs_url=None, redoc_url=None)
     app.state.store = store
+    runner = AgentRunner(on_finish=lambda job_id: store.refresh(store.get(job_id)) if job_id in store.jobs else None)
+    runner.recover(store.out_root)
 
     @app.middleware("http")
     async def same_origin_only(request: Request, call_next: Any) -> Any:
@@ -91,6 +94,7 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
             "llms": mm.llm_choices(), "default_llm": mm.default_llm(), "analysis_llm": store.analysis_llm,
             "profiles": [p.summary() for p in load_profiles().values()], "default_profile": "meeting",
             "home": str(store.out_root.resolve()), "user_profile_dir": str(manage.USER_PROFILE_DIR),
+            "agents": agent_cli.available_agents(), "agent_presets": list(PRESETS),
         }
 
     @app.get("/api/jobs")
@@ -145,6 +149,8 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict[str, str]:
+        if runner.active_job() == job_id:
+            raise HTTPException(409, "an agent is working on this job")
         try:
             store.delete(store.get(job_id))
         except RuntimeError as e:
@@ -257,6 +263,34 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
             raise HTTPException(400, str(e)) from e
         except (RuntimeError, OSError) as e:
             raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/jobs/{job_id}/agent")
+    def agent_state(job_id: str) -> dict[str, Any]:
+        return runner.state(store.get(job_id).out_dir) or {"status": "none"}
+
+    @app.post("/api/jobs/{job_id}/agent")
+    def run_agent(
+        job_id: str, agent: Annotated[str, Form()], instruction: Annotated[str, Form()],
+    ) -> dict[str, Any]:
+        """Let Claude Code / Codex work on this job through the voicekit tools only (see voicekit.agent_run)."""
+        job = store.get(job_id)
+        require_transcript(job)
+        if job.status in ("queued", "running"):
+            raise HTTPException(409, "job is still running")
+        try:
+            return runner.start(job_dir=job.out_dir, agent=agent, instruction=instruction)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except (RuntimeError, SystemExit) as e:
+            raise HTTPException(409, str(e) or "agent CLI unavailable") from e
+
+    @app.post("/api/jobs/{job_id}/agent/cancel")
+    def cancel_agent(job_id: str) -> dict[str, str]:
+        try:
+            runner.cancel(store.get(job_id).out_dir)
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"status": "cancelling"}
 
     @app.get("/api/profiles/{profile_id}")
     def profile_detail(profile_id: str) -> dict[str, Any]:

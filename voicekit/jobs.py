@@ -24,6 +24,7 @@ import meeting_minutes as mm
 from voicekit.profiles import Profile, get_profile
 
 JOB_META = "job.json"
+AGENT_RUN_FILE = "agent_run.json"  # written by voicekit.agent_run
 
 Status = Literal["queued", "running", "done", "error"]
 StepStatus = Literal["none", "running", "done", "error"]
@@ -93,12 +94,19 @@ class Job:
             "analysis_enabled": self._profile().analysis,
             "local_only": self.local_only,
             "dir": str(self.out_dir.resolve()),
+            "agent_status": self._agent_status(),
             "has_audio": self.audio_path() is not None,
             "has_transcript": (self.out_dir / "transcript.json").exists(),
             "has_minutes": (self.out_dir / "minutes.md").exists(),
             "has_analysis": (self.out_dir / "analysis.json").exists(),
             "has_correction": (self.out_dir / "transcript_corrected.json").exists(),
         }
+
+    def _agent_status(self) -> str:
+        try:
+            return str(json.loads((self.out_dir / AGENT_RUN_FILE).read_text(encoding="utf-8")).get("status", "none"))
+        except (OSError, ValueError):
+            return "none"
 
     def profile_default_diarize(self) -> bool:
         return self._profile().diarize
@@ -221,6 +229,14 @@ class JobStore:
                 continue  # half-written by the other process; the next scan sees it whole
             self.jobs[job.id] = job
             self._remember(job)
+
+    def refresh(self, job: Job) -> None:
+        """Re-read ``job.json`` into the live object after another process (an agent run) changed it."""
+        fresh = Job.load(job.out_dir, interrupted=False)
+        with self.lock:
+            for name in Job.__dataclass_fields__:
+                if name not in ("id", "out_dir"):
+                    setattr(job, name, getattr(fresh, name))
 
     def delete(self, job: Job) -> None:
         """Remove the job and its folder. Refused while this process is still working on it."""
