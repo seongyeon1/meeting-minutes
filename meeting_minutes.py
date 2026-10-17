@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from voicekit import llm_settings
 from voicekit.agent_cli import AGENTS, complete_via_agent
 from voicekit.local import (  # noqa: F401 - re-exported: tests and callers use these as meeting_minutes.*
     COMPRESSION_RATIO_THRESHOLD,
@@ -124,6 +125,8 @@ class LLMSpec:
 
 
 _llm_config: dict[str, Any] = {}
+_model_sources: dict[str, str] = {}  # alias -> "file" (llm.toml in the project) or "user" (saved from the web UI)
+_project_llm_path: Optional[Path] = None
 
 
 def configure_llms(path: Optional[Path]) -> None:
@@ -135,15 +138,64 @@ def configure_llms(path: Optional[Path]) -> None:
         [models.local]
         provider = "ollama"
         model = "qwen3:14b"
+
+    Models and defaults saved from the web UI (``~/.config/voicekit/llm.toml``) are layered on top.
     """
     import tomllib
 
-    global _llm_config
+    global _llm_config, _model_sources, _project_llm_path
+    _project_llm_path = path
     path = path or Path(os.environ.get("MEETING_MINUTES_LLM_CONFIG") or LLM_CONFIG_FILE)
-    _llm_config = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    project = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    user = llm_settings.load_config()
+    merged: dict[str, Any] = {**project, "models": {**(project.get("models") or {}), **(user.get("models") or {})}}
+    sources = {n: "file" for n in project.get("models") or {}} | {n: "user" for n in user.get("models") or {}}
     for name in ("default", "analysis_default"):
-        if name in _llm_config:
-            resolve_llm(_llm_config[name])  # fail at startup, not on the first job
+        if user.get(name):
+            merged[name] = user[name]
+    _llm_config, _model_sources = merged, sources
+    for name in ("default", "analysis_default"):
+        if name not in merged:
+            continue
+        try:
+            resolve_llm(merged[name])  # fail at startup, not on the first job
+        except ValueError:
+            if user.get(name) != merged[name]:
+                raise
+            _log(f"saved {name}={merged[name]!r} is not a known model; ignored")  # a stale UI setting must not stop the server
+            merged[name] = project.get(name)
+            if merged[name] is None:
+                del merged[name]
+
+
+def reload_llms() -> None:
+    """Pick up what the web UI just saved (models, defaults) without restarting."""
+    configure_llms(_project_llm_path)
+
+
+def llm_models() -> list[dict[str, Any]]:
+    """Every model you can pick, with where it comes from, for the settings screen."""
+    models = _llm_config.get("models") or {}
+    out = [{"name": n, "source": _model_sources.get(n, "file"), **{k: m.get(k) for k in ("provider", "model", "base_url", "api_key_env", "reasoning")}}
+           for n, m in models.items()]
+    for name, target in BUILTIN_LLMS.items():
+        if name not in models:
+            provider, _, model = target.partition(":")
+            out.append({"name": name, "source": "builtin", "provider": provider, "model": model, "base_url": None,
+                        "api_key_env": None, "reasoning": None})
+    return out
+
+
+def llm_requirements(spec: LLMSpec) -> tuple[Optional[str], bool]:
+    """(env var name of the key this model needs or None, whether a base URL is still missing)."""
+    if spec.provider == "cli":
+        return None, False
+    if spec.provider == "anthropic":
+        return spec.api_key_env or "ANTHROPIC_API_KEY", False
+    default_url, default_key = OPENAI_COMPAT_PROVIDERS[spec.provider]
+    key = spec.api_key_env or (default_key if spec.provider not in ("ollama", "compat") else None)
+    needs_url = not (spec.base_url or default_url)
+    return key, needs_url
 
 
 def default_llm() -> str:
@@ -189,7 +241,17 @@ def resolve_llm(name: str) -> LLMSpec:
 
 
 def _secret(name: str, env_file: Optional[Path]) -> Optional[str]:
-    return os.environ.get(name) or _load_env_file(env_file).get(name)
+    """Environment first, then ``--env-file``, then the keys saved from the web UI."""
+    return os.environ.get(name) or _load_env_file(env_file).get(name) or llm_settings.saved_keys().get(name)
+
+
+def secret_source(name: str, env_file: Optional[Path]) -> Optional[str]:
+    """Where a key comes from (``env``, ``env-file``, ``saved``) or None; never the value."""
+    if os.environ.get(name):
+        return "env"
+    if _load_env_file(env_file).get(name):
+        return "env-file"
+    return "saved" if llm_settings.saved_keys().get(name) else None
 
 
 def _chat_url(spec: LLMSpec, env_file: Optional[Path]) -> str:

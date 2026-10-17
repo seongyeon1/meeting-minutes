@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Annotated, Any, Optional
 from urllib.parse import urlparse
@@ -26,7 +29,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 import meeting_minutes as mm
-from voicekit import agent_cli, manage, memory
+from voicekit import agent_cli, llm_settings, manage, memory
 from voicekit.agent_run import PRESETS, AgentRunner
 from voicekit.jobs import Job, JobNotFound, JobStore
 from voicekit.profiles import get_profile, load_profiles
@@ -360,6 +363,124 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from e
         return {"status": "cancelling"}
+
+    # ---------- LLM settings (models, keys, defaults) ----------
+
+    def model_state(model: dict[str, Any]) -> dict[str, Any]:
+        """One model for the settings screen: where it comes from and whether it can run as configured."""
+        problem: Optional[str] = None
+        key_name: Optional[str] = None
+        key_source: Optional[str] = None
+        try:
+            spec = mm.resolve_llm(model["name"])
+            key_name, needs_url = mm.llm_requirements(spec)
+            key_source = mm.secret_source(key_name, store.env_file) if key_name else None
+            url_env = "LLM_BASE_URL" if spec.provider == "compat" else f"{spec.provider.upper()}_BASE_URL"
+            if needs_url and not mm._secret(url_env, store.env_file):
+                problem = f"주소(base URL)가 없습니다. 모델에 넣거나 {url_env} 를 설정하세요."
+            elif key_name and not key_source:
+                problem = f"{key_name} 키가 없습니다."
+        except ValueError as e:
+            problem = str(e)
+        return {**model, "key_name": key_name, "key_source": key_source, "problem": problem}
+
+    @app.get("/api/llm")
+    def llm_state() -> dict[str, Any]:
+        models = [model_state(m) for m in mm.llm_models()]
+        names = {"ANTHROPIC_API_KEY", *(k for _, k in mm.OPENAI_COMPAT_PROVIDERS.values() if k)}
+        names |= {m["api_key_env"] for m in models if m.get("api_key_env")} | set(llm_settings.saved_keys())
+        saved = llm_settings.saved_keys()
+        keys = [{
+            "name": n, "source": mm.secret_source(n, store.env_file),
+            "hint": llm_settings.hint(saved[n]) if n in saved else None,
+        } for n in sorted(names)]
+        return {
+            "models": models, "keys": keys,
+            "default": mm.default_llm(), "analysis_default": store.analysis_llm,
+            "providers": {n: {"base_url": u, "key": k} for n, (u, k) in mm.OPENAI_COMPAT_PROVIDERS.items()},
+            "config_path": str(llm_settings.config_path()), "secrets_path": str(llm_settings.secrets_path()),
+        }
+
+    def reload_llms() -> None:
+        try:
+            mm.reload_llms()
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.put("/api/llm/models/{name}")
+    def llm_save_model(name: str, body: Annotated[dict[str, Any], Body()]) -> dict[str, str]:
+        try:
+            llm_settings.upsert_model(name, body, {"anthropic", "cli", *mm.OPENAI_COMPAT_PROVIDERS})
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        reload_llms()
+        return {"saved": name}
+
+    @app.delete("/api/llm/models/{name}")
+    def llm_delete_model(name: str) -> dict[str, str]:
+        try:
+            llm_settings.delete_model(name)
+        except KeyError as e:
+            raise HTTPException(404, "only models you saved here can be removed") from e
+        reload_llms()
+        store.analysis_llm = _still_valid(store.analysis_llm)
+        return {"deleted": name}
+
+    def _still_valid(name: str) -> str:
+        try:
+            mm.resolve_llm(name)
+            return name
+        except ValueError:
+            return mm.default_analysis_llm()
+
+    @app.put("/api/llm/defaults")
+    def llm_set_defaults(body: Annotated[dict[str, Any], Body()]) -> dict[str, str]:
+        default, analysis = (str(body.get(k) or "") or None for k in ("default", "analysis_default"))
+        for name in (default, analysis):
+            if name:
+                check_llm(name)
+        llm_settings.set_defaults(default, analysis)
+        reload_llms()
+        if analysis:
+            store.analysis_llm = analysis
+        return {"default": mm.default_llm(), "analysis_default": store.analysis_llm}
+
+    @app.put("/api/llm/keys/{name}")
+    def llm_set_key(name: str, body: Annotated[dict[str, Any], Body()]) -> dict[str, str]:
+        try:
+            llm_settings.set_key(name, str(body.get("value") or ""))
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"saved": name}
+
+    @app.delete("/api/llm/keys/{name}")
+    def llm_delete_key(name: str) -> dict[str, str]:
+        try:
+            llm_settings.delete_key(name)
+        except KeyError as e:
+            raise HTTPException(404, "no saved key with that name (keys from the environment cannot be removed here)") from e
+        return {"deleted": name}
+
+    @app.post("/api/llm/test")
+    def llm_test(body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """One tiny request through the model, so a wrong key or URL shows up now and not on the first job."""
+        name = str(body.get("name") or "")
+        check_llm(name)
+        t0 = time.monotonic()
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(
+            mm._complete, "연결 확인입니다. '확인' 한 단어만 답하세요.", system="You are a connectivity check.",
+            llm=name, env_file=store.env_file,
+        )
+        try:
+            reply = future.result(timeout=60)
+            return {"ok": True, "reply": reply.strip()[:200], "seconds": round(time.monotonic() - t0, 1)}
+        except FutureTimeout:
+            return {"ok": False, "error": "60초 안에 응답이 없습니다."}
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - the point is to show whatever went wrong
+            return {"ok": False, "error": (str(e) or type(e).__name__)[:400]}
+        finally:
+            pool.shutdown(wait=False)
 
     @app.get("/api/profiles/{profile_id}")
     def profile_detail(profile_id: str) -> dict[str, Any]:

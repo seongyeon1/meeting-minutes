@@ -225,6 +225,13 @@
   .turn-edit .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .turn-note { font-size: 12px; color: var(--ok); margin: 2px 0; }
   .mem-off { opacity: .5; }
+  .llm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .llm-grid .full { grid-column: 1 / -1; }
+  .llm-key { display: grid; grid-template-columns: 190px auto 1fr auto auto; gap: 8px; align-items: center; margin-top: 6px; }
+  .llm-test { font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
+  .llm-test.ok { color: var(--ok); }
+  .llm-test.bad { color: var(--err); }
+  h3.sec { margin: 18px 0 0; font-size: 13px; }
   .notice[hidden] { display: none; }
   .mem-add { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: end; margin-top: 14px; }
   .chat { display: grid; gap: 10px; margin: 14px 0 12px; max-height: 58vh; overflow-y: auto; padding-right: 4px; }
@@ -272,6 +279,7 @@
   </div>
   <div class="actions">
     <button class="btn ghost" id="prof-btn" title="녹음 유형 보기·추가·수정">녹음 유형</button>
+    <button class="btn ghost" id="llm-btn" title="문서 작성·보정에 쓸 모델과 API 키">LLM 설정</button>
     <button class="btn ghost" id="mem-btn" title="자주 틀리는 단어를 기억해 다음 녹음에서 바로잡기">기억한 용어</button>
     <button class="btn ghost" id="agent-btn" title="Claude Code·Codex 등에 이 도구 연결">에이전트 연결</button>
     <button class="btn" id="new-btn">+ 새 녹음</button>
@@ -342,6 +350,17 @@
       <button class="btn ghost" type="button" onclick="upload.close()">취소</button>
       <button class="btn" id="submit" type="submit" disabled>시작</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="llm-dlg" class="wide">
+  <form method="dialog">
+    <h2>LLM 설정</h2>
+    <p class="hint" style="margin:0">문서 작성, 녹취록 보정, 대화 분석에 쓸 모델과 API 키를 여기서 정합니다. 환경변수나 llm.toml 없이도 동작합니다.
+      키는 이 PC의 <code id="llm-secrets"></code> 에 나만 읽을 수 있게 저장하고 화면으로 다시 보내지 않습니다.
+      환경변수나 --env-file 로 이미 넣은 키가 있으면 그쪽이 먼저 쓰입니다. 음성 처리에는 LLM을 쓰지 않습니다.</p>
+    <div id="llm-body"></div>
+    <div class="dialog-actions"><button class="btn ghost" type="submit">닫기</button></div>
   </form>
 </dialog>
 
@@ -1314,6 +1333,133 @@ function agentView() {
   if (turns.length && !running && run.status === "done") wrap.append(el("div", { class: "hint" }, "문서와 화자 이름이 바뀌었다면 각 탭에 반영되어 있습니다."));
   requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   return wrap;
+}
+
+// ---------- LLM settings ----------
+const llmDlg = $("#llm-dlg");
+const SRC_LABEL = { env: "환경변수", "env-file": "env 파일", saved: "저장됨" };
+const PROVIDER_SHORT = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Gemini", openrouter: "OpenRouter", ollama: "Ollama", compat: "OpenAI 호환", cli: "로컬 CLI" };
+const PROVIDER_LABEL = { anthropic: "Anthropic (Claude)", openai: "OpenAI", gemini: "Google Gemini", openrouter: "OpenRouter", ollama: "Ollama (로컬)", compat: "OpenAI 호환 서버 (사내 게이트웨이, vLLM 등)", cli: "로컬 CLI (claude / codex)" };
+$("#llm-btn").onclick = () => { llmDlg.showModal(); loadLlm(); };
+let llmEdit = null;  // model being edited in the form, or null for a new one
+async function refreshLlmChoices(useDefault = false) {
+  S.cfg = await (await api("/api/config")).json();
+  const sel = $("#llm"), keep = useDefault || !S.cfg.llms.includes(sel.value) ? S.cfg.default_llm : sel.value;
+  sel.replaceChildren(...S.cfg.llms.map((m) => el("option", { value: m, selected: m === keep }, m)));
+}
+async function llmCall(method, url, body) {
+  try {
+    await api(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+    return true;
+  } catch (err) { alert(err.message); return false; }
+}
+async function loadLlm() {
+  const root = $("#llm-body");
+  let d;
+  try { d = await (await api("/api/llm")).json(); }
+  catch (err) { root.replaceChildren(el("div", { class: "error-box" }, err.message)); return; }
+  $("#llm-secrets").textContent = d.secrets_path;
+  const again = async (changed, useDefault = false) => { if (changed) { await refreshLlmChoices(useDefault); loadLlm(); } };
+  const names = d.models.map((m) => m.name);
+  const pick = (value) => el("select", {}, names.map((n) => el("option", { value: n, selected: n === value }, n)));
+
+  // defaults
+  const defSel = pick(d.default), anaSel = pick(d.analysis_default);
+  const saveDef = el("button", { type: "button", class: "btn small" }, "기본 모델 저장");
+  saveDef.onclick = async () => again(await llmCall("PUT", "/api/llm/defaults", { default: defSel.value, analysis_default: anaSel.value }), true);
+  const defaults = [
+    el("h3", { class: "sec" }, "기본 모델"),
+    el("div", { class: "llm-grid" },
+      el("div", {}, el("label", {}, "문서 작성"), defSel),
+      el("div", {}, el("label", {}, "녹취록 보정 · 대화 분석 (추론형 대형 모델 권장)"), anaSel)),
+    el("div", { class: "prof-row", style: "margin-top:8px" }, saveDef,
+      el("span", { class: "hint" }, "새 녹음의 기본값입니다. 이미 만든 작업의 모델은 그대로입니다.")),
+  ];
+
+  // keys
+  const keyRows = d.keys.map((k) => {
+    const input = el("input", { type: "password", placeholder: k.source ? "새 값으로 바꾸기" : "API 키 붙여넣기", autocomplete: "off" });
+    const save = el("button", { type: "button", class: "btn small" }, "저장");
+    save.onclick = async () => { if (input.value.trim()) again(await llmCall("PUT", `/api/llm/keys/${k.name}`, { value: input.value })); };
+    const del = k.hint ? el("button", { type: "button", class: "btn ghost small danger", onclick: async () => {
+      if (confirm(`저장된 ${k.name} 를 지울까요?`)) again(await llmCall("DELETE", `/api/llm/keys/${k.name}`));
+    } }, "삭제") : el("span");
+    return el("div", { class: "llm-key" }, el("code", {}, k.name),
+      OKTAG(!!k.source, `${SRC_LABEL[k.source] || ""}${k.hint ? " " + k.hint : ""}`, "없음"), input, save, del);
+  });
+  const keys = [el("h3", { class: "sec" }, "API 키"),
+    el("div", { class: "hint" }, "모델마다 필요한 키가 다릅니다. 로컬 CLI(claude-code, codex)와 Ollama는 키가 필요 없습니다. 환경변수로 넣은 키는 이 화면에서 지울 수 없습니다."), ...keyRows];
+
+  // models
+  const modelCards = d.models.map((m) => {
+    const out = el("div", { class: "llm-test" });
+    const test = el("button", { type: "button", class: "btn ghost small", disabled: !!m.problem }, "연결 테스트");
+    test.onclick = async () => {
+      test.disabled = true; out.className = "llm-test"; out.textContent = "요청 중... (최대 60초)";
+      try {
+        const r = await (await api("/api/llm/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: m.name }) })).json();
+        out.className = "llm-test " + (r.ok ? "ok" : "bad");
+        out.textContent = r.ok ? `정상 (${r.seconds}초): ${r.reply}` : "실패: " + r.error;
+      } catch (err) { out.className = "llm-test bad"; out.textContent = err.message; }
+      test.disabled = !!m.problem;
+    };
+    const mine = m.source === "user";
+    return el("div", { class: "agent" },
+      el("div", { class: "row" }, el("b", {}, m.name),
+        el("span", { class: "tag" }, PROVIDER_SHORT[m.provider] || m.provider), el("span", { class: "tag" }, m.model),
+        el("span", { class: "tag" }, { builtin: "내장", file: "llm.toml", user: "내가 추가" }[m.source]),
+        m.name === d.default && el("span", { class: "tag" }, "문서 기본"), m.name === d.analysis_default && el("span", { class: "tag" }, "분석 기본"),
+        el("span", { style: "flex:1" }),
+        test,
+        el("button", { type: "button", class: "btn ghost small", onclick: () => { llmEdit = m; fillModelForm(d); $("#llm-form").scrollIntoView({ behavior: "smooth" }); } }, mine ? "수정" : "복사해서 수정"),
+        mine && el("button", { type: "button", class: "btn ghost small danger", onclick: async () => {
+          if (confirm(`모델 ${m.name} 을(를) 지울까요?`)) again(await llmCall("DELETE", `/api/llm/models/${encodeURIComponent(m.name)}`));
+        } }, "삭제")),
+      m.problem ? el("div", { class: "llm-test bad" }, m.problem)
+        : el("div", { class: "hint" }, m.base_url ? `주소: ${m.base_url}` : "준비됨", m.key_name ? ` · 키 ${m.key_name} (${SRC_LABEL[m.key_source]})` : ""),
+      out);
+  });
+  const form = el("div", { class: "agent", id: "llm-form" });
+  root.replaceChildren(...defaults, ...keys, el("h3", { class: "sec" }, "모델"), ...modelCards, form);
+  fillModelForm(d);
+}
+function fillModelForm(d) {
+  const form = $("#llm-form"), m = llmEdit;
+  const f = {
+    name: el("input", { placeholder: "team-gpt", value: m ? (m.source === "user" ? m.name : m.name + "-2") : "" }),
+    provider: el("select", {}, Object.keys(PROVIDER_LABEL).map((p) => el("option", { value: p, selected: p === (m?.provider || "compat") }, PROVIDER_LABEL[p]))),
+    model: el("input", { placeholder: "모델 id (예: gpt-5.2, claude-opus-5-5, qwen3:14b)", value: m?.model || "" }),
+    base_url: el("input", { placeholder: "https://llm-gateway.example.com/v1", value: m?.base_url || "" }),
+    api_key_env: el("input", { placeholder: "TEAM_LLM_KEY", value: m?.api_key_env || "" }),
+    reasoning: el("input", { type: "checkbox" }),
+  };
+  f.reasoning.checked = !!m?.reasoning;
+  const hint = el("div", { class: "hint full" });
+  const sync = () => {
+    const p = f.provider.value, info = d.providers[p];
+    hint.textContent = p === "cli" ? "모델 칸에 claude 또는 codex (뒤에 :모델명을 붙일 수 있음). 이 PC에 로그인된 CLI로 넘기므로 키가 필요 없습니다."
+      : p === "anthropic" ? "키는 ANTHROPIC_API_KEY (아래 API 키에서 저장)."
+      : `주소 기본값: ${info?.base_url || "없음, 직접 입력"} · 키 기본 이름: ${info?.key || "없음"}`;
+    f.base_url.disabled = p === "cli" || p === "anthropic"; f.api_key_env.disabled = p === "cli";
+  };
+  f.provider.onchange = sync; sync();
+  const save = el("button", { type: "button", class: "btn" }, m && m.source === "user" ? "수정 저장" : "모델 추가");
+  save.onclick = async () => {
+    const body = { provider: f.provider.value, model: f.model.value, base_url: f.base_url.value, api_key_env: f.api_key_env.value };
+    if (f.reasoning.checked) body.reasoning = true;
+    if (!f.name.value.trim()) { alert("이름을 입력하세요."); return; }
+    if (await llmCall("PUT", `/api/llm/models/${encodeURIComponent(f.name.value.trim())}`, body)) { llmEdit = null; await refreshLlmChoices(); loadLlm(); }
+  };
+  form.replaceChildren(
+    el("div", { class: "row" }, el("h3", {}, m ? `모델 ${m.source === "user" ? "수정" : "복사"}: ${m.name}` : "모델 추가"), el("span", { style: "flex:1" }),
+      m && el("button", { type: "button", class: "btn ghost small", onclick: () => { llmEdit = null; fillModelForm(d); } }, "새로 추가")),
+    el("div", { class: "llm-grid" },
+      el("div", {}, el("label", {}, "이름 (화면에 보이는 별칭)"), f.name), el("div", {}, el("label", {}, "종류"), f.provider),
+      el("div", { class: "full" }, el("label", {}, "모델 id"), f.model),
+      el("div", {}, el("label", {}, "주소 (base URL, 비우면 기본값)"), f.base_url), el("div", {}, el("label", {}, "API 키 이름 (환경변수 이름, 비우면 기본값)"), f.api_key_env),
+      el("label", { class: "check full", style: "margin:0;display:flex;gap:6px;align-items:center" }, f.reasoning, "추론 모델 (gpt-5.x, o 시리즈: max_completion_tokens 사용)"),
+      hint),
+    el("div", { class: "prof-row", style: "margin-top:8px" }, save));
 }
 
 // ---------- remembered terms ----------
