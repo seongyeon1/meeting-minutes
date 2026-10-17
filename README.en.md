@@ -70,6 +70,7 @@ The web UI controls the rest too:
 - **Processing mode** (new recording): "Transcript only" runs ASR, alignment and diarization locally and never calls an LLM. Fill the document later with a model, or paste Markdown an agent wrote into "Save as document".
 - **Connect agents** (top bar): shows whether the Claude Code / Codex CLI, the MCP registration and the skill are in place, and connects with a button after showing exactly what will change in your global config. The agent then shares this UI's job folder (`--out-dir`), so jobs it creates show up here and update live. A copyable MCP JSON is there for other agents.
 - **Recording types** (top bar): browse, add, clone, edit and delete profiles (saved to `~/.config/voicekit/profiles/<id>.toml`).
+- **Record in the browser** (new recording): "Record now" captures from the microphone (level meter, preview) and uses the result as the upload. Needs the browser's mic permission; the audio stays on this PC.
 - **Delete job** removes the job and its folder.
 
 ## Profiles, agents, MCP

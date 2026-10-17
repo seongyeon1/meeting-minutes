@@ -228,6 +228,11 @@
   .prof-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
   .prof-grid .full { grid-column: 1 / -1; }
   @media (max-width: 640px) { .prof-grid { grid-template-columns: 1fr; } }
+  .rec { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .rec.on #rec-btn { color: var(--err); border-color: var(--err); }
+  .rec-time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--err); }
+  .rec-meter { width: 80px; height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
+  .rec-meter i { display: block; height: 100%; width: 0; background: var(--err); transition: width .08s linear; }
   .paste { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
   .paste textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
@@ -277,6 +282,13 @@
       <input type="file" id="file" accept="audio/*,video/*" hidden>
       <span id="drop-text">녹음 파일을 끌어다 놓거나 클릭해서 선택</span>
     </div>
+    <div class="rec" id="rec">
+      <button type="button" class="btn ghost small" id="rec-btn">● 지금 녹음</button>
+      <span class="rec-time" id="rec-time" hidden></span>
+      <span class="rec-meter" id="rec-meter" hidden><i></i></span>
+      <span class="hint" id="rec-msg">마이크로 바로 녹음합니다. 소리는 이 PC 밖으로 나가지 않습니다.</span>
+    </div>
+    <audio id="rec-preview" controls hidden style="width:100%;margin-top:8px;height:36px"></audio>
     <label for="language">음성 언어</label>
     <select id="language">
       <option value="ko">한국어</option><option value="en">English</option><option value="ja">日本語</option>
@@ -488,6 +500,74 @@ function onFile() {
   t.replaceChildren(...(f ? [el("strong", {}, f.name), ` (${(f.size / 1048576).toFixed(1)} MB)`] : ["녹음 파일을 끌어다 놓거나 클릭해서 선택"]));
   $("#submit").disabled = !f;
 }
+// ---------- in-browser recording ----------
+const rec = { stream: null, mr: null, chunks: [], t0: 0, timer: null, ctx: null, raf: 0 };
+function recMsg(text, err = false) { const m = $("#rec-msg"); m.textContent = text; m.style.color = err ? "var(--err)" : ""; }
+function recUi(on) {
+  $("#rec").classList.toggle("on", on);
+  $("#rec-btn").textContent = on ? "■ 녹음 끝내기" : "● 지금 녹음";
+  $("#rec-time").hidden = $("#rec-meter").hidden = !on;
+}
+function recCleanup() {
+  clearInterval(rec.timer); cancelAnimationFrame(rec.raf);
+  rec.stream?.getTracks().forEach((t) => t.stop());
+  rec.ctx?.close().catch(() => {});
+  rec.stream = rec.ctx = null;
+}
+async function recStart() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    recMsg("이 브라우저는 녹음을 지원하지 않습니다. 파일로 올려주세요.", true); return;
+  }
+  try {
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+  } catch (err) {
+    recMsg(err.name === "NotAllowedError" ? "마이크 권한이 거부됐습니다. 브라우저 주소창에서 허용해 주세요." : `마이크를 열 수 없습니다: ${err.message}`, true);
+    return;
+  }
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((m) => MediaRecorder.isTypeSupported(m));
+  rec.chunks = [];
+  rec.mr = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
+  rec.mr.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
+  rec.mr.onstop = recFinish;
+  rec.mr.start(1000);  // chunks every second, so a crash loses at most the last second
+  rec.t0 = Date.now();
+  const tick = () => { const s = Math.floor((Date.now() - rec.t0) / 1000); $("#rec-time").textContent = `${Math.floor(s / 60)}:${pad(s % 60)}`; };
+  tick(); rec.timer = setInterval(tick, 500);
+  try {  // level meter
+    rec.ctx = new AudioContext();
+    const an = rec.ctx.createAnalyser(); an.fftSize = 512;
+    rec.ctx.createMediaStreamSource(rec.stream).connect(an);
+    const buf = new Uint8Array(an.fftSize), bar = $("#rec-meter i");
+    const draw = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      bar.style.width = `${Math.min(100, peak / 128 * 220)}%`;
+      rec.raf = requestAnimationFrame(draw);
+    };
+    draw();
+  } catch {}
+  recUi(true); recMsg("녹음 중... 끝나면 「녹음 끝내기」를 누르세요.");
+  $("#rec-preview").hidden = true;
+}
+function recStop() { if (rec.mr && rec.mr.state !== "inactive") rec.mr.stop(); }
+function recFinish() {
+  const type = rec.mr.mimeType || "audio/webm", secs = Math.round((Date.now() - rec.t0) / 1000);
+  recCleanup(); recUi(false);
+  const blob = new Blob(rec.chunks, { type });
+  if (!blob.size) { recMsg("녹음된 소리가 없습니다.", true); return; }
+  const ext = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+  const d = new Date(), stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}`;
+  const file = new File([blob], `녹음 ${stamp}.${ext}`, { type });
+  const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files; onFile();
+  const prev = $("#rec-preview");
+  if (prev.src) URL.revokeObjectURL(prev.src);
+  prev.src = URL.createObjectURL(blob); prev.hidden = false;
+  recMsg(`${dur(secs)} 녹음됨. 아래에서 유형·화자 수를 확인하고 시작하세요.`);
+}
+$("#rec-btn").onclick = () => (rec.mr && rec.mr.state === "recording" ? recStop() : recStart());
+upload.addEventListener("close", () => {  // closing the dialog mid-recording discards it
+  if (rec.mr && rec.mr.state === "recording") { rec.mr.onstop = null; rec.mr.stop(); recCleanup(); recUi(false); recMsg("마이크로 바로 녹음합니다. 소리는 이 PC 밖으로 나가지 않습니다."); }
+});
 $("#form").onsubmit = async (e) => {
   e.preventDefault();
   const f = fileInput.files[0];
@@ -507,7 +587,7 @@ $("#form").onsubmit = async (e) => {
   try {
     const job = await (await api("/api/jobs", { method: "POST", body: fd })).json();
     upload.close();
-    fileInput.value = ""; onFile();
+    fileInput.value = ""; onFile(); $("#rec-preview").hidden = true;
     await refreshJobs();
     select(job.id);
   } catch (err) {
