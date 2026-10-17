@@ -172,7 +172,9 @@ flowchart LR
 2. 내장 별칭: `claude` → `anthropic:claude-opus-5-5`, `gpt` → `openai:gpt-5.2`
 3. `provider:model` 형식. 모델 id 안의 콜론은 그대로 둔다(`ollama:qwen3:14b`).
 
-기본 모델은 `llm.toml`의 `default`(회의록)와 `analysis_default`(보정·분석)이고, 없으면 `claude`. 설정 파일의 기본값이 해석되지 않으면 시작할 때 바로 실패한다.
+기본 모델은 `llm.toml`의 `default`(회의록)와 `analysis_default`(보정·분석)이고, 없으면 `claude`. 프로젝트 설정 파일의 기본값이 해석되지 않으면 시작할 때 바로 실패한다.
+
+**화면에서 바꾼 설정** (`voicekit/llm_settings.py`): 모델 별칭과 기본값은 `~/.config/voicekit/llm.toml`, API 키는 `~/.config/voicekit/secrets.env`(0600)에 저장한다(`VOICEKIT_CONFIG_DIR`로 위치 변경). `configure_llms`가 프로젝트 `llm.toml` 위에 이 파일을 겹쳐 읽고(같은 이름은 화면 쪽이 이김), 저장하면 `reload_llms`로 재시작 없이 반영한다. 키 조회 순서는 환경변수, `--env-file`, 저장한 키(`_secret`)라서 기존에 export해 둔 키가 그대로 우선한다. 화면에서 저장한 기본값이 가리키던 모델이 사라져도 서버는 뜨고(그 기본값만 무시), 키 값은 API 응답에 한 번도 실리지 않는다(끝 4자리 힌트와 출처만). 「연결 테스트」는 `_complete`로 한 단어짜리 요청을 보내 60초 안에 결과나 오류 문구를 돌려준다.
 
 `llm.toml`을 둔 이유는 사내 게이트웨이처럼 주소와 키 이름이 정해진 엔드포인트를 코드에 넣지 않기 위해서다. 공개 코드에는 일반 제공자만 있고, 설치마다 다른 설정은 gitignore된 파일에 남는다.
 
@@ -268,6 +270,10 @@ sequenceDiagram
 
 화자 표시 이름 우선순위: 확정한 이름 → 분석 1순위 후보(미상이 아니고 50% 이상이면 "추정 NN%"와 함께) → 원래 라벨.
 
+### 5.1 용어 기억 (`voicekit/memory.py`)
+
+사용자가 발화를 고치면(`JobStore.edit_turn`) 어절 단위 diff에서 「잘못 → 올바른」 쌍을 뽑아(`extract_pairs`, 공통 조사는 떼고, 여러 곳을 바꾼 재작성은 버림) 녹음 유형별 JSON(`~/.config/voicekit/memory/<유형>.json`, 공통은 `common.json`)에 센다. 쌍은 2번 확인되거나 고정되어야 쓰이고, 한 글자 표기는 고정된 것만 자동 치환한다. 쓰이는 곳은 세 군데다: ASR 전에 올바른 표기를 `initial_prompt`(300자 예산)에 병합, 녹취록 생성 직후 단어 경계와 조사를 보며 치환(`apply_to_turns`, 결과는 `memory_applied.json`), 보정·문서 프롬프트의 용어 목록. 전부 LLM 없이 로컬에서 하고, 작업별 `use_memory`와 `VOICEKIT_MEMORY=off`로 끌 수 있다. 범위 이름은 정규식으로 검증해서 파일 경로로 쓰이는 값이 밖으로 나가지 못한다.
+
 ## 6. 코드 구조
 
 계층은 한 방향으로만 의존한다: `voicekit/types, local, profiles, agent_cli` (음성·프롬프트 재료, LLM 클라이언트 모름) ← `meeting_minutes` (프롬프트 조립 + LLM 연결 + 기존 CLI) ← `voicekit/jobs, service` (작업 상태, 워커) ← 진입점 셋 (웹, `voicekit` CLI, MCP 서버). 무거운 의존성(whisperx, httpx, anthropic, mcp)은 쓰는 함수 안에서 import한다. 그래서 json 입력으로 문서만 다시 만들거나 테스트를 돌릴 때는 torch를 띄우지 않는다.
@@ -278,6 +284,8 @@ sequenceDiagram
 | `voicekit.local`: `_find_loops` / `collapse_repeats` / `_repair_segments` | 반복 인식 탐지·제거, 반복되거나 발화를 건너뛴 세그먼트만 비배치 모드로 재디코딩 |
 | `voicekit.local`: `segments_to_turns` | 단어 화자 기준 쪼개기 + 2초 이내 병합 |
 | `voicekit.profiles`: `Profile` / `get_profile` / `with_profile` | 녹음 유형(TOML): 문서 양식 프롬프트, 화자 분리·보정·분석 기본값, 입력창 라벨 |
+| `voicekit.memory` | 유형별 용어 기억: 학습(`learn`), 힌트(`vocab_hint`), 치환(`apply`) |
+| `voicekit.llm_settings` | 화면에서 저장하는 모델 별칭·기본값·API 키 (`llm.toml`, `secrets.env`) |
 | `voicekit.agent_cli`: `complete_via_agent` | 로컬 `claude -p` / `codex exec` 에 프롬프트를 넘겨 답을 받음 |
 | `voicekit.jobs`: `Job` / `JobStore` | 작업 상태, 로컬 워커 1개 + LLM 워커 풀. `local_only` 면 녹취록까지만 |
 | `voicekit.service`: `Service` | CLI·MCP가 쓰는 동작(녹취 시작, 녹취록 페이지 읽기, 프롬프트, 문서 저장) |
@@ -349,7 +357,7 @@ Python은 3.12로 고정했다. 3.14에서는 의존성 설치가 되지 않았�
 
 - 음성은 로컬에서만 처리한다. 모델 가중치만 처음 한 번 Hugging Face에서 받는다.
 - LLM에는 녹취록 텍스트만 보낸다. `--no-summary`면 외부 호출이 전혀 없고, `ollama:`면 LLM 단계도 로컬이다.
-- 키는 환경변수나 `--env-file`로만 읽고, 코드·산출물·로그에 남기지 않는다.
+- 키는 환경변수, `--env-file`, 화면에서 저장한 `~/.config/voicekit/secrets.env`(0600)에서만 읽고, 코드·산출물·로그·API 응답에 남기지 않는다.
 - `out/`, 음성 파일, `llm.toml`, `.env`는 gitignore. 회의 녹취록은 민감 정보일 수 있어 산출물을 저장소에 넣지 않는다.
 
 ## 8. 실측 (Apple M4 Pro, CPU)

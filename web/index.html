@@ -227,12 +227,13 @@
   .mem-off { opacity: .5; }
   .llm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
   .llm-grid .full { grid-column: 1 / -1; }
-  .llm-key { display: grid; grid-template-columns: 190px auto 1fr auto auto; gap: 8px; align-items: center; margin-top: 6px; }
+  .llm-key { display: grid; grid-template-columns: 200px 130px 1fr 56px 56px; gap: 8px; align-items: center; margin-top: 6px; }
   .llm-test { font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
   .llm-test.ok { color: var(--ok); }
   .llm-test.bad { color: var(--err); }
   h3.sec { margin: 18px 0 0; font-size: 13px; }
   .notice[hidden] { display: none; }
+  .prof-row select { width: auto; min-width: 150px; }
   .mem-add { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: end; margin-top: 14px; }
   .chat { display: grid; gap: 10px; margin: 14px 0 12px; max-height: 58vh; overflow-y: auto; padding-right: 4px; }
   .chat-me { display: flex; justify-content: flex-end; }
@@ -1329,7 +1330,7 @@ function agentView() {
       S.data[job.id].agent = null; agentDrafts[job.id] = ""; refreshJobs(); renderView();
     } catch (err) { alert(err.message); }
   } }, "새 대화");
-  wrap.append(chat, presets, text, el("div", { class: "prof-row", style: "margin-top:8px" }, go, stop, sel, el("span", { style: "flex:1" }), fresh));
+  wrap.append(chat, ...(presets ? [presets] : []), text, el("div", { class: "prof-row", style: "margin-top:8px" }, go, stop, sel, el("span", { style: "flex:1" }), fresh));
   if (turns.length && !running && run.status === "done") wrap.append(el("div", { class: "hint" }, "문서와 화자 이름이 바뀌었다면 각 탭에 반영되어 있습니다."));
   requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   return wrap;
