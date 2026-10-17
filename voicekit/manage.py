@@ -85,35 +85,49 @@ def install_steps(target: str, home: Optional[Path] = None) -> list[str]:
 
 
 def _register_cmd(target: str, home: Optional[Path]) -> list[str]:
-    env = [f"{'-e' if target == 'claude' else '--env'}", f"VOICEKIT_HOME={home}"] if home else []
+    env_flag = "-e" if target == "claude" else "--env"
+    env = [env_flag, f"VOICEKIT_HOME={home}"] if home else []
     if target == "claude":
         return ["claude", "mcp", "add", "--scope", "user", *env, SERVER_NAME, "--", *mcp_command()]
     return ["codex", "mcp", "add", *env, SERVER_NAME, "--", *mcp_command()]
 
 
+def _install_skill() -> str:
+    """Claude Code: copy the skill into the user's skills folder."""
+    skill_dir = _skill_dir()
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(SKILL_FILE, skill_dir / "SKILL.md")
+    return f"skill -> {skill_dir / 'SKILL.md'}"
+
+
+def _install_instructions() -> str:
+    """Codex: add the marked block to ``~/.codex/AGENTS.md``."""
+    write_agents_block()
+    return f"instructions -> {_agents_md()}"
+
+
+# The request only picks an entry here; the executable and the files it touches never come from the request.
+_INSTALLERS: dict[str, tuple[str, Any]] = {"claude": ("claude", _install_skill), "codex": ("codex", _install_instructions)}
+
+
 def install_agent(target: str, home: Optional[Path] = None) -> dict[str, Any]:
     """Put the guidance in place and register the MCP server. Replaces an existing registration."""
     steps = install_steps(target, home)
-    if shutil.which(target) is None:
-        raise RuntimeError(f"`{target}` 이(가) PATH 에 없습니다")
-    done: list[str] = []
-    if target == "claude":
-        _skill_dir().mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(SKILL_FILE, _skill_dir() / "SKILL.md")
-        done.append(f"skill -> {_skill_dir() / 'SKILL.md'}")
-    else:
-        write_agents_block(_agents_md())
-        done.append(f"instructions -> {_agents_md()}")
+    cli, install_guidance = _INSTALLERS[target]
+    if shutil.which(cli) is None:
+        raise RuntimeError(f"`{cli}` 이(가) PATH 에 없습니다")
+    done = [install_guidance()]
     # `mcp add` fails on an existing name; remove first so re-installing moves the job folder too.
-    subprocess.run([target, "mcp", "remove", *(["--scope", "user"] if target == "claude" else []), SERVER_NAME],
-                   capture_output=True, text=True, timeout=60, check=False)
-    r = subprocess.run(_register_cmd(target, home), capture_output=True, text=True, timeout=60, check=False)
+    remove = [cli, "mcp", "remove", *(["--scope", "user"] if cli == "claude" else []), SERVER_NAME]
+    subprocess.run(remove, capture_output=True, text=True, timeout=60, check=False)
+    r = subprocess.run(_register_cmd(cli, home), capture_output=True, text=True, timeout=60, check=False)
     done.append((r.stdout + r.stderr).strip() or f"mcp add exit {r.returncode}")
-    return {"target": target, "ok": r.returncode == 0, "steps": steps, "output": done}
+    return {"target": cli, "ok": r.returncode == 0, "steps": steps, "output": done}
 
 
-def write_agents_block(path: Path) -> None:
-    """Idempotent marked block so Codex knows when to reach for the tools."""
+def write_agents_block() -> None:
+    """Idempotent marked block in ``~/.codex/AGENTS.md`` so Codex knows when to reach for the tools."""
+    path = _agents_md()
     body = SKILL_FILE.read_text(encoding="utf-8").split("---", 2)[-1].strip()
     block = f"{AGENTS_MARK[0]}\n## voicekit (local speech pipeline)\n\n{body}\n{AGENTS_MARK[1]}\n"
     path.parent.mkdir(parents=True, exist_ok=True)
