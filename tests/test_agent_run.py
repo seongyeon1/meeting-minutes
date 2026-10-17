@@ -113,6 +113,29 @@ def test_run_lifecycle_logs_tools_and_notifies(tmp_path: Path, fake_claude: Path
     assert json.loads((out / "job.json").read_text())["id"] == "job000000001"
 
 
+def test_chat_keeps_history_and_replays_it(tmp_path: Path, fake_claude: Path) -> None:
+    out = make_job(tmp_path)
+    runner = AgentRunner()
+    runner.start(job_dir=out, agent="claude", instruction="첫 질문")
+    wait_idle(runner)
+    runner.start(job_dir=out, agent="claude", instruction="두번째 질문")
+    wait_idle(runner)
+    state = runner.state(out) or {}
+    assert state["instruction"] == "두번째 질문" and [t["instruction"] for t in state["history"]] == ["첫 질문"]
+    assert "history" not in state["history"][0]
+
+    last = {k: v for k, v in state.items() if k != "history"}
+    prompt = agent_run._prompt("claude", "j1", "세번째", [*state["history"], last])
+    assert "사용자: 첫 질문" in prompt and "사용자: 두번째 질문" in prompt and prompt.endswith("요청: 세번째")
+    assert "이전 대화" not in agent_run._prompt("claude", "j1", "x", [])
+
+    runner.start(job_dir=out, agent="claude", instruction="새로", reset=True)
+    wait_idle(runner)
+    assert (runner.state(out) or {})["history"] == []
+    runner.clear(out)
+    assert runner.state(out) is None
+
+
 def test_failure_cancel_and_bad_input(tmp_path: Path, fake_claude: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     out = make_job(tmp_path)
     runner = AgentRunner()
@@ -167,6 +190,16 @@ def test_web_runs_agent_and_refreshes_job(client: TestClient) -> None:
         time.sleep(0.05)
     assert job["agent_status"] == "done"
     assert client.get("/api/jobs/job000000001/agent").json()["log"]
+
+    client.post("/api/jobs/job000000001/agent", data={"agent": "claude", "instruction": "again"})
+    for _ in range(100):
+        again = client.get("/api/jobs/job000000001/agent").json()
+        if again["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert again["history"][0]["instruction"].startswith("이 작업의 녹취록으로")
+    assert client.delete("/api/jobs/job000000001/agent").status_code == 200
+    assert client.get("/api/jobs/job000000001/agent").json() == {"status": "none"}
 
 
 def test_web_rejects_bad_agent_requests(client: TestClient, tmp_path: Path) -> None:

@@ -220,6 +220,12 @@
   .agent { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; display: grid; gap: 8px; }
   .agent .row, .prof-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .agent h3 { margin: 0; font-size: 14px; }
+  .chat { display: grid; gap: 10px; margin: 14px 0 12px; max-height: 58vh; overflow-y: auto; padding-right: 4px; }
+  .chat-me { display: flex; justify-content: flex-end; }
+  .chat-bubble { max-width: 88%; border-radius: 10px; padding: 10px 12px; font-size: 13.5px; display: grid; gap: 6px; }
+  .chat-bubble.me { background: var(--accent); color: var(--accent-text); white-space: pre-wrap; }
+  .chat-bubble.ai { border: 1px solid var(--line); max-width: 100%; }
+  .chat-bubble .row { display: flex; gap: 8px; align-items: center; }
   pre.code { margin: 0; padding: 10px; border-radius: 6px; background: var(--soft); font-size: 12px; white-space: pre-wrap;
     word-break: break-all; max-height: 180px; overflow: auto; }
   .log-out { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
@@ -1171,50 +1177,73 @@ const PRESET_TEXT = {
   speakers: ["화자 이름 확정", "녹취록에서 근거가 분명한 화자 이름만 찾아 확정하고, 근거가 약한 화자는 건드리지 마. 근거를 한 줄씩 알려줘."],
   actions: ["결정·할 일만", "녹취록에서 결정사항과 할 일(담당자, 기한)만 뽑아 문서로 저장해줘. 없는 내용은 만들지 마."],
 };
+const agentDrafts = {};  // unsent text per job, kept across re-renders
+function agentTurn(t) {
+  const label = { running: "진행 중", done: "완료", error: "실패", cancelled: "중단됨" }[t.status] || t.status;
+  return [
+    el("div", { class: "chat-me" }, el("div", { class: "chat-bubble me" }, t.instruction)),
+    el("div", { class: "chat-ai" }, el("div", { class: "chat-bubble ai" },
+      el("div", { class: "row" }, el("b", {}, AGENT_NAMES[t.agent] || t.agent),
+        el("span", { class: `badge s-${t.status === "cancelled" ? "error" : t.status}` }, label)),
+      t.log?.length > 0 && el("details", { open: t.status === "running" }, el("summary", { class: "hint" }, `도구 ${t.log.length}회 호출`),
+        el("pre", { class: "code" }, t.log.join("\n"))),
+      t.status === "running" && !t.result && el("div", { class: "hint" }, "작업 중..."),
+      t.result && el("div", { style: "white-space:pre-wrap;font-size:13.5px" }, t.result),
+      t.error && el("div", { class: "error-box" }, t.error))),
+  ];
+}
 function agentView() {
   const job = S.job, d = S.data[job.id], run = d.agent, running = job.agent_status === "running";
   const wrap = el("div", { class: "minutes" });
   const agents = S.cfg.agents;
   wrap.append(el("p", { class: "hint", style: "margin-top:12px" },
-    "이 PC의 Claude Code·Codex 가 이 작업의 녹취록을 읽고 문서를 쓰거나 화자 이름을 정리합니다. 쓸 수 있는 건 voicekit 도구뿐이고 ",
-    "(셸·파일·웹 없음), 이 작업 외의 녹음과 새 녹취 시작은 막혀 있습니다. 녹취록 텍스트는 해당 CLI 가 로그인된 서비스로 전송됩니다."));
+    "이 PC의 Claude Code·Codex 와 이 작업에 대해 이어서 대화합니다. 녹취록을 읽고 문서를 쓰거나 화자 이름을 정리하고, 결과를 보고 다시 고쳐 달라고 할 수 있습니다. ",
+    "쓸 수 있는 건 voicekit 도구뿐이고 (셸·파일·웹 없음), 이 작업 외의 녹음과 새 녹취 시작은 막혀 있습니다. 녹취록 텍스트는 해당 CLI 가 로그인된 서비스로 전송됩니다."));
   if (!agents.length) {
     wrap.append(el("div", { class: "notice err" }, "claude 또는 codex CLI 를 찾지 못했습니다. 설치하고 로그인한 뒤 서버를 다시 시작하세요."));
     return wrap;
   }
+  const turns = run && run.status !== "none" ? [...(run.history || []), run] : [];
+  const chat = el("div", { class: "chat" }, turns.length
+    ? turns.flatMap(agentTurn)
+    : el("div", { class: "hint" }, "아직 대화가 없습니다. 아래 예시를 누르거나 직접 시킬 일을 적어 보내세요."));
   const sel = el("select", { disabled: running }, agents.map((a) => el("option", { value: a }, AGENT_NAMES[a] || a)));
-  const text = el("textarea", { placeholder: "에이전트에게 시킬 일", disabled: running, style: "min-height:90px" });
-  text.value = run?.instruction || PRESET_TEXT.document[1];
   if (run?.agent) sel.value = run.agent;
-  const presets = el("div", { class: "prof-list" }, S.cfg.agent_presets.map((k) => el("button", {
-    type: "button", class: "chip", disabled: running, onclick: () => { text.value = PRESET_TEXT[k][1]; },
+  const text = el("textarea", { placeholder: turns.length ? "이어서 시킬 일 (Enter 전송, Shift+Enter 줄바꿈)" : "에이전트에게 시킬 일", disabled: running, style: "min-height:64px" });
+  text.value = agentDrafts[job.id] || "";
+  text.oninput = () => { agentDrafts[job.id] = text.value; };
+  const presets = !turns.length && el("div", { class: "prof-list" }, S.cfg.agent_presets.map((k) => el("button", {
+    type: "button", class: "chip", disabled: running, onclick: () => { text.value = agentDrafts[job.id] = PRESET_TEXT[k][1]; text.focus(); },
   }, PRESET_TEXT[k][0])));
-  const go = el("button", { class: "btn", disabled: running }, running ? "실행 중..." : "실행");
-  go.onclick = async () => {
-    if (!text.value.trim()) return;
-    if (job.has_minutes && /저장|작성|확정/.test(text.value) &&
+  const go = el("button", { class: "btn", disabled: running }, running ? "작업 중..." : "보내기");
+  const send = async () => {
+    const msg = text.value.trim();
+    if (!msg || running) return;
+    if (!turns.length && job.has_minutes && /저장|작성|확정/.test(msg) &&
         !confirm("에이전트가 기존 문서나 확정한 화자 이름을 덮어쓸 수 있습니다. 계속할까요?")) return;
     go.disabled = true;
-    const fd = new FormData(); fd.append("agent", sel.value); fd.append("instruction", text.value);
+    const fd = new FormData(); fd.append("agent", sel.value); fd.append("instruction", msg);
     try {
       await api(`/api/jobs/${job.id}/agent`, { method: "POST", body: fd });
+      agentDrafts[job.id] = "";
       S.data[job.id].agent = null; clearTimeout(S.pollTimer); poll(true); refreshJobs();
     } catch (err) { alert("실행 실패: " + err.message); go.disabled = false; }
   };
+  go.onclick = send;
+  text.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
   const stop = running && el("button", { class: "btn ghost danger", onclick: async () => {
     try { await api(`/api/jobs/${job.id}/agent/cancel`, { method: "POST" }); } catch (err) { alert(err.message); }
   } }, "중단");
-  wrap.append(el("label", { class: "hint" }, "에이전트"), sel, el("label", { class: "hint", style: "margin-top:10px;display:block" }, "시킬 일"), presets, text,
-    el("div", { class: "prof-row", style: "margin-top:10px" }, go, stop));
-  if (run && run.status !== "none") {
-    const label = { running: "진행 중", done: "완료", error: "실패", cancelled: "중단됨" }[run.status] || run.status;
-    wrap.append(el("div", { class: "agent", style: "margin-top:16px" },
-      el("div", { class: "row" }, el("h3", {}, `${AGENT_NAMES[run.agent] || run.agent} 실행`), el("span", { class: `badge s-${run.status === "cancelled" ? "error" : run.status}` }, label)),
-      run.log.length > 0 && el("pre", { class: "code" }, run.log.join("\n")),
-      run.result && el("div", { style: "white-space:pre-wrap;font-size:13.5px" }, run.result),
-      run.error && el("div", { class: "error-box" }, run.error),
-      run.status === "done" && el("div", { class: "hint" }, "문서와 화자 이름이 바뀌었다면 각 탭에 반영되어 있습니다.")));
-  }
+  const fresh = turns.length > 0 && !running && el("button", { class: "btn ghost small", onclick: async () => {
+    if (!confirm("이 작업의 에이전트 대화를 지우고 새로 시작할까요? (저장된 문서는 그대로입니다)")) return;
+    try {
+      await api(`/api/jobs/${job.id}/agent`, { method: "DELETE" });
+      S.data[job.id].agent = null; agentDrafts[job.id] = ""; refreshJobs(); renderView();
+    } catch (err) { alert(err.message); }
+  } }, "새 대화");
+  wrap.append(chat, presets, text, el("div", { class: "prof-row", style: "margin-top:8px" }, go, stop, sel, el("span", { style: "flex:1" }), fresh));
+  if (turns.length && !running && run.status === "done") wrap.append(el("div", { class: "hint" }, "문서와 화자 이름이 바뀌었다면 각 탭에 반영되어 있습니다."));
+  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
   return wrap;
 }
 

@@ -271,6 +271,7 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
     @app.post("/api/jobs/{job_id}/agent")
     def run_agent(
         job_id: str, agent: Annotated[str, Form()], instruction: Annotated[str, Form()],
+        reset: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         """Let Claude Code / Codex work on this job through the voicekit tools only (see voicekit.agent_run)."""
         job = store.get(job_id)
@@ -278,11 +279,20 @@ def create_app(out_root: Path, env_file: Optional[Path], analysis_llm: Optional[
         if job.status in ("queued", "running"):
             raise HTTPException(409, "job is still running")
         try:
-            return runner.start(job_dir=job.out_dir, agent=agent, instruction=instruction)
+            return runner.start(job_dir=job.out_dir, agent=agent, instruction=instruction, reset=reset)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         except (RuntimeError, SystemExit) as e:
             raise HTTPException(409, str(e) or "agent CLI unavailable") from e
+
+    @app.delete("/api/jobs/{job_id}/agent")
+    def clear_agent(job_id: str) -> dict[str, str]:
+        """Start the chat over."""
+        try:
+            runner.clear(store.get(job_id).out_dir)
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"status": "none"}
 
     @app.post("/api/jobs/{job_id}/agent/cancel")
     def cancel_agent(job_id: str) -> dict[str, str]:
