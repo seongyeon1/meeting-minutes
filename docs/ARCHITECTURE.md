@@ -270,32 +270,52 @@ sequenceDiagram
 
 ## 6. 코드 구조
 
-핵심 로직은 `meeting_minutes.py` 하나에 있고, 웹은 그걸 가져다 쓰는 얇은 층이다. 무거운 의존성(whisperx, httpx, anthropic)은 쓰는 함수 안에서 import한다. 그래서 json 입력으로 회의록만 다시 만들거나 테스트를 돌릴 때는 torch를 띄우지 않는다.
+계층은 한 방향으로만 의존한다: `voicekit/types, local, profiles, agent_cli` (음성·프롬프트 재료, LLM 클라이언트 모름) ← `meeting_minutes` (프롬프트 조립 + LLM 연결 + 기존 CLI) ← `voicekit/jobs, service` (작업 상태, 워커) ← 진입점 셋 (웹, `voicekit` CLI, MCP 서버). 무거운 의존성(whisperx, httpx, anthropic, mcp)은 쓰는 함수 안에서 import한다. 그래서 json 입력으로 문서만 다시 만들거나 테스트를 돌릴 때는 torch를 띄우지 않는다.
 
 | 이름 | 역할 |
 |---|---|
-| `_find_loops` / `is_repetition_loop` / `collapse_repeats` | 반복 인식 탐지·제거 |
-| `_repair_segments` / `is_sparse_segment` | 반복되거나 발화를 건너뛴 세그먼트만 비배치 모드로 다시 디코딩 |
-| `transcribe_and_diarize` | ASR → 반복·누락 복구 → 정렬 → 화자 분리 → 단어-화자 결합 |
-| `segments_to_turns` | 단어 화자 기준 쪼개기 + 2초 이내 병합 |
-| `build_user_prompt` / `write_minutes` | 회의록 프롬프트 조립과 호출 |
-| `LLMSpec` / `configure_llms` / `resolve_llm` | 모델 이름 해석, `llm.toml` 읽기 |
-| `complete_openai_compat` / `minutes_via_claude` / `_complete` | LLM 클라이언트와 분기 |
-| `correct_transcript` / `build_correction_prompt` / `_accept_correction` | 녹취록 보정 |
-| `analyze_transcript` / `normalize_analysis` | 대화 분석과 응답 검증 |
-| `meeting_minutes_web.Job` / `JobStore` / `create_app` | 웹 작업 상태, 워커, 엔드포인트 |
+| `voicekit.local`: `transcribe_and_diarize` | ASR → 반복·누락 복구 → 정렬 → 화자 분리 → 단어-화자 결합. `diarize=False`, `align=False` 로 단계 생략, 정렬 모델 없는 언어는 자동 생략 |
+| `voicekit.local`: `_find_loops` / `collapse_repeats` / `_repair_segments` | 반복 인식 탐지·제거, 반복되거나 발화를 건너뛴 세그먼트만 비배치 모드로 재디코딩 |
+| `voicekit.local`: `segments_to_turns` | 단어 화자 기준 쪼개기 + 2초 이내 병합 |
+| `voicekit.profiles`: `Profile` / `get_profile` / `with_profile` | 녹음 유형(TOML): 문서 양식 프롬프트, 화자 분리·보정·분석 기본값, 입력창 라벨 |
+| `voicekit.agent_cli`: `complete_via_agent` | 로컬 `claude -p` / `codex exec` 에 프롬프트를 넘겨 답을 받음 |
+| `voicekit.jobs`: `Job` / `JobStore` | 작업 상태, 로컬 워커 1개 + LLM 워커 풀. `local_only` 면 녹취록까지만 |
+| `voicekit.service`: `Service` | CLI·MCP가 쓰는 동작(녹취 시작, 녹취록 페이지 읽기, 프롬프트, 문서 저장) |
+| `voicekit.mcp_server` | MCP 도구 10개 (stdio) |
+| `voicekit.cli` | `voicekit` 명령 (profiles, transcribe, prompt, handoff, save-document, mcp, install) |
+| `meeting_minutes`: `build_user_prompt` / `write_minutes` | 프로필 기반 문서 프롬프트 조립과 호출 |
+| `meeting_minutes`: `LLMSpec` / `configure_llms` / `resolve_llm` | 모델 이름 해석, `llm.toml` 읽기 (`cli:` 포함) |
+| `meeting_minutes`: `complete_openai_compat` / `minutes_via_claude` / `_complete` | LLM 클라이언트와 분기 |
+| `meeting_minutes`: `correct_transcript` / `analyze_transcript` | 녹취록 보정, 대화 분석과 응답 검증 |
+| `meeting_minutes_web.create_app` | 엔드포인트 (프로필 목록, 에이전트용 프롬프트 포함) |
 
 ```
 meeting-minutes/
-├── meeting_minutes.py      # 파이프라인 + LLM 연결 + CLI
+├── meeting_minutes.py      # 프롬프트·LLM 연결·기존 CLI (voicekit 의 로컬 단계를 재수출)
 ├── meeting_minutes_web.py  # 로컬 웹 서버
+├── voicekit/
+│   ├── types.py local.py   # Turn, 로컬 음성 파이프라인 (LLM 없음)
+│   ├── profiles.py + profiles/*.toml   # 녹음 유형 7종
+│   ├── agent_cli.py        # claude / codex CLI 에 넘기기
+│   ├── jobs.py service.py  # 작업 저장소와 동작 (웹·CLI·MCP 공용)
+│   ├── mcp_server.py cli.py
+│   └── skill/SKILL.md      # 에이전트용 스킬 (voicekit install 이 복사)
 ├── web/index.html          # 화면 (HTML·CSS·JS 한 장)
-├── tests/                  # STT·LLM을 스텁으로 바꾼 테스트
+├── tests/                  # STT·LLM·에이전트 CLI를 스텁으로 바꾼 테스트
 ├── llm.example.toml        # 모델 별칭 예시 (복사해서 llm.toml)
 ├── .env.example            # 키 예시
-├── pyproject.toml          # Python 3.12 고정, 엔트리포인트 2개
+├── pyproject.toml          # Python 3.12 고정, 엔트리포인트 3개, mcp 는 extra
 └── out/                    # gitignore, 산출물
 ```
+
+### 6.0 설계 메모: 확장성
+
+- **프로필은 데이터다.** 새 녹음 유형은 코드 수정 없이 TOML 한 개로 추가한다. 회의 프롬프트는 원문 그대로 `meeting.toml` 로 옮겼고(테스트가 동일성을 확인), 보정·분석 프롬프트는 "회의" 표현이 든 한 벌을 유지하되 유형별 한 줄 머리말(`with_profile`)로 해석을 바꾼다. 프롬프트가 유형 수만큼 갈라져 따로 낡는 것을 막으려는 선택이다.
+- **한 명이 말하는 녹음은 화자 분리를 건너뛴다.** 가장 느린 단계이고 결과(전부 `SPEAKER_00`)가 뻔하기 때문이다. 프로필 기본값이고 작업마다 덮어쓸 수 있다.
+- **LLM이 필요 없는 부분만 에이전트에 열었다.** MCP 서버는 녹취(로컬)와 문서 저장·프롬프트 제공만 한다. 문서 작성은 호출한 에이전트의 모델이 하므로 키 설정이 없고, 필요하면 `generate_document` 로 다른 모델에 맡긴다.
+- **작업은 웹·CLI·MCP가 같은 폴더 구조(`<id>/job.json`, `transcript.json`, `minutes.md`)를 쓴다.** 에이전트가 만든 작업이 웹 화면에 같이 보인다. 문서 파일 이름은 호환을 위해 어떤 유형이든 `minutes.md` 로 둔다.
+- **MCP stdio 보호.** 모델 라이브러리가 stdout에 찍는 로그가 프로토콜 스트림을 깨지 않게 파이프라인 스레드의 stdout을 stderr로 돌린다.
+- **에이전트 CLI는 격리 실행.** 빈 임시 폴더, 도구 끔(Claude `--tools ""`, Codex `read-only`), 사용자 설정 미로드(`--setting-sources ""`)로 돌려 프롬프트만 읽게 한다. Codex는 시스템 프롬프트 플래그가 없어 지시문을 사용자 텍스트 앞에 붙인다.
 
 ### 6.1 transcript.json 형식
 

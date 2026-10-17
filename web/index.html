@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>회의록 만들기</title>
+<title>음성 녹취·정리</title>
 <link rel="icon" href="data:,">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
@@ -213,6 +213,41 @@
   .regen label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   @media (max-width: 640px) { .regen { grid-template-columns: 1fr; } }
 
+  .topbar .actions { display: flex; gap: 8px; align-items: center; }
+  .btn.danger { color: var(--err); border-color: var(--err); }
+  .tag { font-size: 11px; padding: 0 7px; border-radius: 4px; background: var(--soft); color: var(--muted); line-height: 18px; white-space: nowrap; }
+  .tag.ok { color: var(--ok); } .tag.no { color: var(--faint); }
+  .agent { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; display: grid; gap: 8px; }
+  .agent .row, .prof-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .agent h3 { margin: 0; font-size: 14px; }
+  .turn-edit { display: grid; gap: 6px; margin: 2px 0; }
+  .turn-edit textarea { min-height: 56px; }
+  .turn-edit .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .turn-note { font-size: 12px; color: var(--ok); margin: 2px 0; }
+  .mem-off { opacity: .5; }
+  .notice[hidden] { display: none; }
+  .mem-add { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 8px; align-items: end; margin-top: 14px; }
+  .chat { display: grid; gap: 10px; margin: 14px 0 12px; max-height: 58vh; overflow-y: auto; padding-right: 4px; }
+  .chat-me { display: flex; justify-content: flex-end; }
+  .chat-bubble { max-width: 88%; border-radius: 10px; padding: 10px 12px; font-size: 13.5px; display: grid; gap: 6px; }
+  .chat-bubble.me { background: var(--accent); color: var(--accent-text); white-space: pre-wrap; }
+  .chat-bubble.ai { border: 1px solid var(--line); max-width: 100%; }
+  .chat-bubble .row { display: flex; gap: 8px; align-items: center; }
+  pre.code { margin: 0; padding: 10px; border-radius: 6px; background: var(--soft); font-size: 12px; white-space: pre-wrap;
+    word-break: break-all; max-height: 180px; overflow: auto; }
+  .log-out { font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+  dialog.wide { width: min(720px, calc(100vw - 32px)); }
+  .prof-list { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+  .prof-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .prof-grid .full { grid-column: 1 / -1; }
+  @media (max-width: 640px) { .prof-grid { grid-template-columns: 1fr; } }
+  .rec { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .rec.on #rec-btn { color: var(--err); border-color: var(--err); }
+  .rec-time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--err); }
+  .rec-meter { width: 80px; height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
+  .rec-meter i { display: block; height: 100%; width: 0; background: var(--err); transition: width .08s linear; }
+  .paste { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+  .paste textarea { min-height: 120px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
 
   /* upload dialog */
@@ -232,46 +267,141 @@
 <body>
 <div class="topbar">
   <div>
-    <h1>회의록 만들기</h1>
-    <p>음성은 이 PC에서만 처리하고, 분석·회의록 단계에서 녹취록 텍스트만 LLM에 보냅니다.</p>
+    <h1>음성 녹취·정리</h1>
+    <p>음성은 이 PC에서만 처리하고, 문서 작성 단계에서 녹취록 텍스트만 LLM에 보냅니다.</p>
   </div>
-  <button class="btn" id="new-btn">+ 새 회의</button>
+  <div class="actions">
+    <button class="btn ghost" id="prof-btn" title="녹음 유형 보기·추가·수정">녹음 유형</button>
+    <button class="btn ghost" id="mem-btn" title="자주 틀리는 단어를 기억해 다음 녹음에서 바로잡기">기억한 용어</button>
+    <button class="btn ghost" id="agent-btn" title="Claude Code·Codex 등에 이 도구 연결">에이전트 연결</button>
+    <button class="btn" id="new-btn">+ 새 녹음</button>
+  </div>
 </div>
 <div class="shell">
   <nav class="panel jobs"><h2>작업 목록</h2><ul id="jobs"></ul></nav>
   <section class="panel" id="detail">
-    <div class="empty">녹음 파일을 올리면 대화 흐름과 회의록이 여기 나옵니다.<br>
-      7분 회의 기준 약 8분 걸립니다 (화자분리가 대부분).<br><br>
-      <button class="btn" onclick="openUpload()">+ 새 회의</button></div>
+    <div class="empty">녹음 파일을 올리면 대화 흐름과 정리 문서가 여기 나옵니다.<br>
+      7분 회의 기준 약 8분 걸립니다 (화자분리가 대부분). 한 명이 말하는 강의·메모는 화자분리를 건너뛰어 훨씬 빠릅니다.<br><br>
+      <button class="btn" onclick="openUpload()">+ 새 녹음</button></div>
   </section>
 </div>
 
 <dialog id="upload">
   <form id="form" method="dialog">
-    <h2>새 회의</h2>
-    <div class="drop" id="drop">
+    <h2>새 녹음</h2>
+    <label for="profile">녹음 유형</label>
+    <select id="profile"></select>
+    <div class="hint" id="profile-hint"></div>
+    <div class="drop" id="drop" style="margin-top:12px">
       <input type="file" id="file" accept="audio/*,video/*" hidden>
       <span id="drop-text">녹음 파일을 끌어다 놓거나 클릭해서 선택</span>
     </div>
+    <div class="rec" id="rec">
+      <button type="button" class="btn ghost small" id="rec-btn">● 지금 녹음</button>
+      <span class="rec-time" id="rec-time" hidden></span>
+      <span class="rec-meter" id="rec-meter" hidden><i></i></span>
+      <span class="hint" id="rec-msg">마이크로 바로 녹음합니다. 소리는 이 PC 밖으로 나가지 않습니다.</span>
+    </div>
+    <audio id="rec-preview" controls hidden style="width:100%;margin-top:8px;height:36px"></audio>
+    <label for="language">음성 언어</label>
+    <select id="language">
+      <option value="ko">한국어</option><option value="en">English</option><option value="ja">日本語</option>
+      <option value="zh">中文</option><option value="auto">자동 감지</option>
+    </select>
+    <label class="check"><input type="checkbox" id="diarize" checked>
+      <span>화자 분리<br><span class="hint">여러 명이 말하는 녹음에 켭니다. 끄면 가장 느린 단계를 건너뜁니다.</span></span></label>
     <label for="speakers">화자 수</label>
     <input id="speakers" type="number" min="1" max="20" placeholder="모르면 비워두기">
     <div class="hint">알면 꼭 넣어주세요. 화자분리 정확도가 가장 크게 오릅니다.</div>
-    <label for="names">참석자 이름 후보</label>
+    <label for="names" id="names-label">참석자 이름 후보</label>
     <input id="names" placeholder="김팀장, 이선임, 박매니저">
     <div class="hint">화자별 이름 확률을 이 후보 안에서 계산합니다.</div>
     <label for="vocab">자주 나오는 용어</label>
     <input id="vocab" placeholder="QA, 결제 모듈, 스프린트">
-    <label for="context">회의 배경</label>
+    <label for="context" id="context-label">회의 배경</label>
     <textarea id="context" placeholder="11월 출시 일정 점검 회의"></textarea>
-    <label for="llm">회의록 모델</label>
+    <label class="check"><input type="checkbox" id="use-memory" checked>
+      <span>기억한 용어 사용<br>
+      <span class="hint">이 녹음 유형에서 고쳐 둔 단어를 인식 힌트와 자동 바로잡기에 씁니다.</span></span></label>
+    <label for="mode">처리 방식</label>
+    <select id="mode">
+      <option value="auto">녹취부터 문서까지 자동</option>
+      <option value="local">녹취록만 만들기 (LLM 호출 없음)</option>
+    </select>
+    <div class="hint" id="mode-hint"></div>
+    <div id="llm-fields">
+    <label for="llm" id="llm-label">문서 작성 모델</label>
     <select id="llm"></select>
-    <div class="hint">화자·담당자 매핑은 추론형 대형 모델(Claude, GPT-5 급)이 가장 정확합니다.</div>
+    <div class="hint">화자·담당자 매핑은 추론형 대형 모델(Claude, GPT-5 급)이 가장 정확합니다.
+      <b>claude-code</b>, <b>codex</b> 는 이 PC에 로그인된 CLI에 넘겨 작성하므로 API 키가 필요 없습니다.</div>
     <label class="check"><input type="checkbox" id="correct" checked>
-      <span>녹취록을 맥락 기반으로 먼저 보정하고, 그 보정본으로 분석·회의록 작성<br>
-      <span class="hint">이름 후보·용어·회의 배경을 넣으면 고유명사 보정이 정확해집니다.</span></span></label>
+      <span>녹취록을 맥락 기반으로 먼저 보정하고, 그 보정본으로 분석·문서 작성<br>
+      <span class="hint">이름 후보·용어·배경을 넣으면 고유명사 보정이 정확해집니다.</span></span></label>
+    </div>
     <div class="dialog-actions">
       <button class="btn ghost" type="button" onclick="upload.close()">취소</button>
       <button class="btn" id="submit" type="submit" disabled>시작</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="memory" class="wide">
+  <form method="dialog" id="mem-form">
+    <h2>기억한 용어</h2>
+    <p class="hint" style="margin:0">대화 흐름에서 발화를 고치면 「잘못 인식된 표기 → 올바른 표기」를 녹음 유형별로 기억합니다.
+      같은 고침이 <span id="mem-min">2</span>번 쌓이거나 직접 고정하면 다음 녹음부터 인식 힌트와 자동 바로잡기에 쓰입니다.
+      모든 처리는 이 PC 안에서 하고 LLM을 부르지 않습니다. 「공통」은 모든 유형에 적용됩니다.</p>
+    <div id="mem-off" class="notice err" hidden>VOICEKIT_MEMORY=off 라서 기억한 용어를 쓰지 않습니다.</div>
+    <div class="prof-list" id="mem-scopes"></div>
+    <div id="mem-body"></div>
+    <div class="mem-add">
+      <div><label for="mem-right">올바른 표기</label><input id="mem-right" placeholder="QA"></div>
+      <div><label for="mem-wrong">잘못 인식되는 표기 (쉼표로 여러 개, 비워도 됨)</label><input id="mem-wrong" placeholder="카, 큐에이"></div>
+      <button class="btn" type="button" id="mem-add">추가</button>
+    </div>
+    <div class="dialog-actions"><button class="btn ghost" type="submit">닫기</button></div>
+  </form>
+</dialog>
+
+<dialog id="agents" class="wide">
+  <form method="dialog">
+    <h2>에이전트 연결</h2>
+    <p class="hint" style="margin:0">Claude Code, Codex 같은 에이전트가 이 PC에서 음성 인식·화자분리를 직접 실행하게 연결합니다.
+      음성은 로컬에서만 처리되고, 에이전트는 녹취록 텍스트를 읽어 자기 모델로 문서를 씁니다.
+      연결하면 이 화면의 작업 폴더를 에이전트와 공유하므로, 에이전트가 만든 녹취가 작업 목록에 바로 나타납니다.</p>
+    <div id="agents-body"><div class="hint" style="margin-top:12px">상태 확인 중...</div></div>
+    <div class="dialog-actions"><button class="btn ghost" type="submit">닫기</button></div>
+  </form>
+</dialog>
+
+<dialog id="profiles" class="wide">
+  <form method="dialog" id="prof-form">
+    <h2>녹음 유형</h2>
+    <p class="hint" style="margin:0">유형마다 문서 양식(지시문)과 기본 처리 방식이 다릅니다. 내장 유형을 고쳐 저장하면
+      사용자 파일(<span id="prof-dir"></span>)이 내장본을 덮어쓰고, 삭제하면 내장본으로 돌아갑니다.</p>
+    <div class="prof-list" id="prof-list"></div>
+    <div class="prof-grid" id="prof-fields">
+      <div><label for="pf-id">id (영문 소문자·숫자·-_)</label><input id="pf-id" placeholder="sales-call"></div>
+      <div><label for="pf-label">이름</label><input id="pf-label" placeholder="영업 통화"></div>
+      <div><label for="pf-document">만들어지는 문서</label><input id="pf-document" placeholder="영업 통화 요약"></div>
+      <div><label for="pf-speakers">기본 화자 수</label><input id="pf-speakers" type="number" min="1" max="20" placeholder="비워두기"></div>
+      <div class="full"><label for="pf-description">설명</label><input id="pf-description" placeholder="고객과 영업 담당 통화"></div>
+      <div><label for="pf-names">이름 후보 입력란 제목</label><input id="pf-names" placeholder="등장인물 이름 후보"></div>
+      <div><label for="pf-context">배경 입력란 제목</label><input id="pf-context" placeholder="녹음 배경"></div>
+      <div class="full" style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px">
+        <label class="check" style="margin:0"><input type="checkbox" id="pf-diarize" checked><span>화자 분리</span></label>
+        <label class="check" style="margin:0"><input type="checkbox" id="pf-analysis" checked><span>화자 이름·주제 분석</span></label>
+        <label class="check" style="margin:0"><input type="checkbox" id="pf-correct" checked><span>녹취록 보정 기본 켜짐</span></label>
+      </div>
+      <div class="full"><label for="pf-system">문서 작성 지시문 (system prompt)</label>
+        <textarea id="pf-system" style="min-height:200px" placeholder="녹취록으로 어떤 문서를 어떤 양식으로 쓸지 적습니다."></textarea></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn ghost danger" type="button" id="pf-delete" hidden>삭제</button>
+      <span style="flex:1"></span>
+      <button class="btn ghost" type="button" id="pf-copy">복제해서 새 유형</button>
+      <button class="btn" type="submit" id="pf-save">저장</button>
+      <button class="btn ghost" type="button" onclick="profiles.close()">닫기</button>
     </div>
   </form>
 </dialog>
@@ -289,6 +419,7 @@ const S = {
   view: "conv",
   textMode: "corrected",        // corrected | original
   openDiffs: new Set(),
+  editTurn: null, turnNote: null,   // turn being edited; note about what the memory learned
   filter: { hidden: new Set(), q: "", keyOnly: false },
   follow: true,
   pollTimer: null, tickTimer: null,
@@ -370,6 +501,25 @@ function richText(text) {
 }
 
 // ---------- upload ----------
+function applyProfile() {
+  const p = S.cfg.profiles.find((x) => x.id === $("#profile").value);
+  if (!p) return;
+  $("#profile-hint").textContent = p.description;
+  $("#names-label").textContent = p.names_label;
+  $("#context-label").textContent = p.context_label;
+  $("#llm-label").textContent = `${p.document} 작성 모델`;
+  $("#diarize").checked = p.diarize;
+  $("#correct").checked = p.correct;
+  $("#speakers").placeholder = p.speakers ? `기본 ${p.speakers}명` : "모르면 비워두기";
+}
+function applyMode() {
+  const local = $("#mode").value === "local";
+  $("#llm-fields").hidden = local;
+  $("#mode-hint").textContent = local
+    ? "이 PC에서 음성 인식·정렬·화자분리만 하고 멈춥니다. 문서는 연결한 에이전트(MCP)나 직접 붙여넣기로 채우거나, 나중에 이 화면에서 모델을 골라 만들 수 있습니다."
+    : "녹취가 끝나면 선택한 모델이 녹취록 텍스트로 문서를 씁니다.";
+}
+$("#mode").onchange = applyMode;
 const upload = $("#upload"), fileInput = $("#file"), drop = $("#drop");
 function openUpload() { upload.showModal(); }
 $("#new-btn").onclick = openUpload;
@@ -386,23 +536,95 @@ function onFile() {
   t.replaceChildren(...(f ? [el("strong", {}, f.name), ` (${(f.size / 1048576).toFixed(1)} MB)`] : ["녹음 파일을 끌어다 놓거나 클릭해서 선택"]));
   $("#submit").disabled = !f;
 }
+// ---------- in-browser recording ----------
+const rec = { stream: null, mr: null, chunks: [], t0: 0, timer: null, ctx: null, raf: 0 };
+function recMsg(text, err = false) { const m = $("#rec-msg"); m.textContent = text; m.style.color = err ? "var(--err)" : ""; }
+function recUi(on) {
+  $("#rec").classList.toggle("on", on);
+  $("#rec-btn").textContent = on ? "■ 녹음 끝내기" : "● 지금 녹음";
+  $("#rec-time").hidden = $("#rec-meter").hidden = !on;
+}
+function recCleanup() {
+  clearInterval(rec.timer); cancelAnimationFrame(rec.raf);
+  rec.stream?.getTracks().forEach((t) => t.stop());
+  rec.ctx?.close().catch(() => {});
+  rec.stream = rec.ctx = null;
+}
+async function recStart() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    recMsg("이 브라우저는 녹음을 지원하지 않습니다. 파일로 올려주세요.", true); return;
+  }
+  try {
+    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true } });
+  } catch (err) {
+    recMsg(err.name === "NotAllowedError" ? "마이크 권한이 거부됐습니다. 브라우저 주소창에서 허용해 주세요." : `마이크를 열 수 없습니다: ${err.message}`, true);
+    return;
+  }
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"].find((m) => MediaRecorder.isTypeSupported(m));
+  rec.chunks = [];
+  rec.mr = new MediaRecorder(rec.stream, mime ? { mimeType: mime } : undefined);
+  rec.mr.ondataavailable = (e) => e.data.size && rec.chunks.push(e.data);
+  rec.mr.onstop = recFinish;
+  rec.mr.start(1000);  // chunks every second, so a crash loses at most the last second
+  rec.t0 = Date.now();
+  const tick = () => { const s = Math.floor((Date.now() - rec.t0) / 1000); $("#rec-time").textContent = `${Math.floor(s / 60)}:${pad(s % 60)}`; };
+  tick(); rec.timer = setInterval(tick, 500);
+  try {  // level meter
+    rec.ctx = new AudioContext();
+    const an = rec.ctx.createAnalyser(); an.fftSize = 512;
+    rec.ctx.createMediaStreamSource(rec.stream).connect(an);
+    const buf = new Uint8Array(an.fftSize), bar = $("#rec-meter i");
+    const draw = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      bar.style.width = `${Math.min(100, peak / 128 * 220)}%`;
+      rec.raf = requestAnimationFrame(draw);
+    };
+    draw();
+  } catch {}
+  recUi(true); recMsg("녹음 중... 끝나면 「녹음 끝내기」를 누르세요.");
+  $("#rec-preview").hidden = true;
+}
+function recStop() { if (rec.mr && rec.mr.state !== "inactive") rec.mr.stop(); }
+function recFinish() {
+  const type = rec.mr.mimeType || "audio/webm", secs = Math.round((Date.now() - rec.t0) / 1000);
+  recCleanup(); recUi(false);
+  const blob = new Blob(rec.chunks, { type });
+  if (!blob.size) { recMsg("녹음된 소리가 없습니다.", true); return; }
+  const ext = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+  const d = new Date(), stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}`;
+  const file = new File([blob], `녹음 ${stamp}.${ext}`, { type });
+  const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files; onFile();
+  const prev = $("#rec-preview");
+  if (prev.src) URL.revokeObjectURL(prev.src);
+  prev.src = URL.createObjectURL(blob); prev.hidden = false;
+  recMsg(`${dur(secs)} 녹음됨. 아래에서 유형·화자 수를 확인하고 시작하세요.`);
+}
+$("#rec-btn").onclick = () => (rec.mr && rec.mr.state === "recording" ? recStop() : recStart());
+upload.addEventListener("close", () => {  // closing the dialog mid-recording discards it
+  if (rec.mr && rec.mr.state === "recording") { rec.mr.onstop = null; rec.mr.stop(); recCleanup(); recUi(false); recMsg("마이크로 바로 녹음합니다. 소리는 이 PC 밖으로 나가지 않습니다."); }
+});
 $("#form").onsubmit = async (e) => {
   e.preventDefault();
   const f = fileInput.files[0];
   if (!f) return;
   const fd = new FormData();
   fd.append("file", f);
-  for (const k of ["speakers", "names", "vocab", "context", "llm"]) {
+  for (const k of ["speakers", "names", "vocab", "context", "llm", "profile", "language"]) {
     const v = $("#" + k).value.trim();
     if (v) fd.append(k, v);
   }
-  fd.append("correct", $("#correct").checked ? "true" : "false");
+  const local = $("#mode").value === "local";
+  fd.append("local_only", local ? "true" : "false");
+  if (local) { fd.delete("llm"); fd.append("correct", "false"); } else fd.append("correct", $("#correct").checked ? "true" : "false");
+  fd.append("diarize", $("#diarize").checked ? "true" : "false");
+  fd.append("use_memory", $("#use-memory").checked ? "true" : "false");
   const btn = $("#submit");
   btn.disabled = true; btn.textContent = "업로드 중...";
   try {
     const job = await (await api("/api/jobs", { method: "POST", body: fd })).json();
     upload.close();
-    fileInput.value = ""; onFile();
+    fileInput.value = ""; onFile(); $("#rec-preview").hidden = true;
     await refreshJobs();
     select(job.id);
   } catch (err) {
@@ -457,7 +679,7 @@ async function poll(first = false) {
   const changed = await loadData(job, prev);
   renderHead();
   if (first || changed || !prev) { renderPlayer(first); renderTabs(); renderView(); }
-  const busy = job.status === "queued" || job.status === "running" || job.analysis_status === "running" || job.correction_status === "running";
+  const busy = job.status === "queued" || job.status === "running" || job.analysis_status === "running" || job.correction_status === "running" || job.agent_status === "running";
   if (busy) S.pollTimer = setTimeout(() => poll(), 2000);
   if (prev && ["status", "analysis_status", "correction_status"].some((k) => prev[k] !== job[k])) refreshJobs();
 }
@@ -481,7 +703,13 @@ async function loadData(job, prev) {
     d.analysis = await (await api(`/api/jobs/${job.id}/files/analysis.json`)).json();
     changed = true;
   }
-  if (job.has_minutes && (!d.minutes || (fin(prev, "status") && job.status === "done"))) {
+  if (job.agent_status !== "none" && (!d.agent || job.agent_status === "running" || fin(prev, "agent_status"))) {
+    const before = JSON.stringify(d.agent);
+    d.agent = await (await api(`/api/jobs/${job.id}/agent`)).json();
+    if (before !== JSON.stringify(d.agent)) changed = true;
+  }
+  const agentDone = prev && prev.agent_status !== job.agent_status && job.agent_status === "done";
+  if (job.has_minutes && (!d.minutes || agentDone || (fin(prev, "status") && job.status === "done"))) {
     d.minutes = await (await api(`/api/jobs/${job.id}/files/minutes.md`)).text();
     changed = true;
   }
@@ -509,8 +737,13 @@ function renderHead() {
     job.has_minutes && job.status !== "running" && job.status !== "queued",
     job.has_analysis && job.analysis_status !== "running"];
   const running = { "녹취록 보정": job.correction_status === "running", "대화 분석": job.analysis_status === "running" };
-  const steps = STEPS.map(([name, mark], i) => {
+  const steps = STEPS.map(([name0, mark0], i) => {
+    const doc = name0 === "회의록";
+    const name = doc ? docName(job) : name0, mark = doc ? `${docName(job)} 완료` : mark0;
     if (name === "녹취록 보정" && !job.correct && !job.has_correction && job.correction_status === "none") return null;
+    if (name0 === "화자 분리" && job.diarize === false) return null;
+    if (job.local_only && i >= 3) return null;  // the document is written by an external agent
+    if (name0 === "대화 분석" && job.analysis_enabled === false) return null;
     const done = byFiles[i] || logText.includes(mark);
     const now = !done && !nowSet && (job.status === "running" || running[name]);
     if (now) nowSet = true;
@@ -523,7 +756,10 @@ function renderHead() {
         el("h2", {}, job.filename),
         el("div", { class: "sub" }, job.stage, timed && " · ", timed && elapsed,
           job.speakers.length ? ` · 화자 ${job.speakers.length}명` : "")),
-      el("span", { class: `badge s-${job.status}` }, STATUS[job.status])),
+      el("div", { style: "display:flex;gap:8px;align-items:center" },
+        job.local_only && el("span", { class: "tag", title: "음성 처리만 로컬에서 했고 문서는 외부 에이전트나 직접 작성" }, "녹취록만"),
+        el("span", { class: `badge s-${job.status}` }, STATUS[job.status]),
+        el("button", { class: "btn ghost small danger", onclick: deleteJob, title: "이 작업과 폴더를 삭제" }, "삭제"))),
     (job.log.length > 0 || job.status === "running") && el("div", { class: "steps" }, steps),
     job.error && el("div", { class: "error-box" }, job.error),
     job.log.length > 0 && el("details", { class: "log" }, el("summary", {}, "진행 로그"), el("pre", {}, logText)),
@@ -578,13 +814,13 @@ function renderTabs() {
   tabs.style.display = "";
   const tab = (key, label) => el("button", { class: S.view === key ? "on" : "", onclick: () => { S.view = key; renderTabs(); renderView(); } }, label);
   const dl = (f, label, ok) => ok && el("a", { href: `/api/jobs/${job.id}/files/${f}?download=true` }, "↓ " + label);
-  tabs.replaceChildren(
-    tab("conv", "대화 흐름"), tab("minutes", "회의록"),
+  tabs.replaceChildren(...[
+    tab("conv", "대화 흐름"), tab("minutes", docName(job)), tab("agent", job.agent_status === "running" ? "에이전트 ●" : "에이전트"),
     el("span", { class: "spacer" }),
-    dl("minutes.md", "회의록", job.has_minutes), dl("transcript_corrected.md", "보정본", job.has_correction),
+    dl("minutes.md", docName(job), job.has_minutes), dl("transcript_corrected.md", "보정본", job.has_correction),
     dl("transcript.md", "원문", job.has_transcript),
     dl("analysis.json", "분석", job.has_analysis),
-  );
+  ].filter(Boolean));
 }
 
 function renderView() {
@@ -593,7 +829,7 @@ function renderView() {
     v.replaceChildren(S.job.status === "error" ? "" : el("div", { class: "empty" }, "녹취록을 만드는 중입니다. 단계가 끝나면 대화가 여기 나옵니다."));
     return;
   }
-  v.replaceChildren(S.view === "conv" ? convView() : minutesView());
+  v.replaceChildren(S.view === "conv" ? convView() : S.view === "agent" ? agentView() : minutesView());
   if (playingIdx >= 0) { const n = document.getElementById(`turn-${playingIdx}`); n && n.classList.add("playing"); }
 }
 
@@ -645,6 +881,42 @@ function shareBar(turns, from, to) {
     el("span", { style: `width:${stats[l].sec / (total || 1) * 100}%;background:${color(l)}`, title: `${speakerInfo(l).name} ${pct(stats[l].sec / (total || 1))}` })));
 }
 
+// ---------- fix a turn (and teach the memory) ----------
+function turnEditor(i, text) {
+  const ta = el("textarea", {});
+  ta.value = text;
+  const common = el("input", { type: "checkbox" });
+  const cancel = () => { S.editTurn = null; renderView(); };
+  const save = async () => {
+    const next = ta.value.trim();
+    if (!next || next === text) return cancel();
+    const job = S.job, d = S.data[job.id], corrected = useCorrected();
+    const fd = new FormData();
+    fd.append("text", next); fd.append("corrected", corrected ? "true" : "false");
+    if (common.checked) fd.append("scope", "common");
+    try {
+      const r = await (await api(`/api/jobs/${job.id}/turns/${i}`, { method: "PUT", body: fd })).json();
+      (corrected ? d.correction : d.transcript).turns[i].text = r.text;
+      if (corrected) d.changes[i] = { ...(d.changes[i] || { turn: i, original: text, rejected: null }), corrected: r.text };
+      const where = common.checked ? "공통" : "이 유형";
+      const notes = r.learned.map((l) => `「${l.wrong}」 → 「${l.right}」 ${where}에 기억함 (${l.replace ? "이제 자동 적용" : l.active ? "인식 힌트로 쓰임, 한 글자 표기는 고정해야 자동 치환" : `${l.count}/${S.cfg.memory_min || 2}, 한 번 더 고치면 사용`})`);
+      S.turnNote = { i, text: [...notes, job.has_minutes ? "문서에는 다시 생성해야 반영됩니다." : ""].filter(Boolean).join(" · ") };
+      S.editTurn = null; renderView();
+    } catch (err) { alert("저장 실패: " + err.message); }
+  };
+  ta.onkeydown = (e) => {
+    if (e.key === "Escape") cancel();
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); save(); }
+  };
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
+  return el("div", { class: "turn-edit" }, ta,
+    el("div", { class: "row" },
+      el("button", { class: "btn small", type: "button", onclick: save }, "저장"),
+      el("button", { class: "btn ghost small", type: "button", onclick: cancel }, "취소"),
+      el("label", { class: "check hint", style: "margin:0;display:flex;gap:4px;align-items:center" }, common, "모든 녹음 유형에 적용"),
+      el("span", { class: "hint" }, "Enter 저장 · Esc 취소")));
+}
+
 function convView() {
   const d = S.data[S.job.id], turns = d.transcript.turns, analysis = d.analysis;
   const keyByTurn = Object.fromEntries((analysis?.key_turns || []).map((k) => [k.turn, k]));
@@ -694,10 +966,12 @@ function convView() {
             el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start))),
           el("div", { class: "text-row" },
             el("button", { class: "ts", title: "여기부터 재생", onclick: () => seek(t.start) }, ts(t.start)),
-            el("p", { class: "text" }, highlighted(text, q),
+            S.editTurn === i ? turnEditor(i, text) : el("p", { class: "text" }, highlighted(text, q),
+              S.job.status === "done" && S.job.agent_status !== "running" && el("button", { class: "fix", title: "이 발화 고치기 (자주 틀리는 단어는 기억합니다)", onclick: () => { S.editTurn = i; renderView(); } }, "수정"),
               change && el("button", { class: "fix", title: "보정 전후 비교", onclick: () => {
                 S.openDiffs.has(i) ? S.openDiffs.delete(i) : S.openDiffs.add(i); renderView();
               } }, change.corrected === change.original ? "보정 제안 거절됨" : "보정됨"))),
+          S.turnNote?.i === i && el("div", { class: "turn-note" }, S.turnNote.text),
           change && S.openDiffs.has(i) && el("div", { class: "diff" },
             change.corrected !== change.original ? wordDiff(change.original, change.corrected) : el("span", { class: "faint" }, "원문 유지"),
             change.rejected && el("div", { class: "rej" }, "거절된 제안 (원문 대비 길이 변화가 커서 요약·추가로 판단): ", change.rejected)),
@@ -784,7 +1058,7 @@ function sidebar(turns, topics, analysis) {
     el("h4", {}, "화자"),
     S.job.analysis_status !== "running" && el("div", { class: "reanalyze" }, namesInput, reanalyzeButton("다시 분석", namesInput)),
     labels().map((l) => speakerBlock(l, stats[l] || { sec: 0, count: 0 }, total, turns)),
-    el("div", { class: "hint", style: "margin-top:8px" }, "확정한 이름은 회의록 탭의 「회의록 다시 만들기」에 반영됩니다."));
+    el("div", { class: "hint", style: "margin-top:8px" }, `확정한 이름은 ${docName(S.job)} 탭의 「다시 만들기」에 반영됩니다.`));
   const toc = topics.length > 1 && el("div", { class: "card" }, el("h4", {}, "주제 흐름"),
     el("ul", { class: "toc" }, topics.map((tp, i) => el("li", {
       onclick: () => document.getElementById(`topic-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" }),
@@ -878,6 +1152,16 @@ function reanalyzeButton(label, namesInput) {
 }
 
 // ---------- minutes view ----------
+const docName = (job) => job.document || "회의록";
+async function copyAgentPrompt(e) {
+  const b = e.currentTarget;
+  try {
+    const p = await (await api(`/api/jobs/${S.job.id}/prompt`)).json();
+    await navigator.clipboard.writeText(`${p.system}\n\n---\n\n${p.user}`);
+    b.textContent = "복사됨";
+  } catch (err) { alert("복사 실패: " + err.message); }
+  setTimeout(() => { b.textContent = "에이전트용 프롬프트 복사"; }, 1500);
+}
 function minutesView() {
   const job = S.job, d = S.data[job.id];
   const wrap = el("div", { class: "minutes" });
@@ -886,13 +1170,13 @@ function minutesView() {
     if (window.marked && window.DOMPurify) doc.innerHTML = DOMPurify.sanitize(marked.parse(d.minutes));
     else doc.append(el("pre", { class: "raw" }, d.minutes));  // CDN unavailable: raw Markdown
   } else {
-    doc.append(el("p", { class: "hint" }, job.status === "error" ? "회의록이 없습니다." : "회의록 작성 중..."));
+    doc.append(el("p", { class: "hint" }, job.status === "error" ? `${docName(job)}이(가) 없습니다.` : job.local_only ? "녹취록만 만들어 둔 작업입니다. 연결한 에이전트가 문서를 저장하면 여기 나옵니다." : `${docName(job)} 작성 중...`));
   }
   wrap.append(doc);
   if (job.has_transcript && (job.status === "done" || job.status === "error")) {
     const sel = el("select", {}, S.cfg.llms.map((m) => el("option", { value: m, selected: m === job.llm }, m)));
     const names = el("input", { placeholder: "참석자 이름 후보 (선택)", value: job.names || "" });
-    const btn = el("button", { class: "btn ghost" }, "회의록 다시 만들기");
+    const btn = el("button", { class: "btn ghost" }, `${docName(job)} 다시 만들기`);
     btn.onclick = async () => {
       btn.disabled = true;
       const fd = new FormData();
@@ -909,17 +1193,290 @@ function minutesView() {
       el("div", {}, el("label", {}, "모델"), sel),
       el("div", {}, el("label", {}, "이름 후보"), names),
       btn),
+      el("div", { class: "regen", style: "margin-top:8px" },
+        el("button", { class: "btn ghost", onclick: copyAgentPrompt }, "에이전트용 프롬프트 복사"),
+        el("span", { class: "hint" }, "Claude Code·Codex 등에 붙여 넣으면 같은 문서를 만들어 줍니다. 저장은 MCP 연결 시 save_document.")),
       el("div", { class: "hint", style: "margin-top:6px" }, confirmed.length
         ? `확정한 화자 이름이 반영됩니다: ${confirmed.map(([k, v]) => `${k}=${v}`).join(", ")}`
-        : "대화 흐름 탭에서 화자 이름을 확정하면 회의록에 그대로 반영됩니다."),
+        : `대화 흐름 탭에서 화자 이름을 확정하면 ${docName(job)}에 그대로 반영됩니다.`),
       el("div", { class: "hint" }, d.correction ? "다시 만들면 보정본 기준으로 작성됩니다." : "보정본이 없어서 원문 기준으로 작성됩니다."));
   }
+  if (job.has_transcript && job.status !== "running" && job.status !== "queued") wrap.append(pasteBlock(job));
   return wrap;
 }
+
+function pasteBlock(job) {
+  const area = el("textarea", { placeholder: `에이전트가 쓴 ${docName(job)} Markdown 을 붙여넣으면 이 작업의 문서로 저장됩니다.` });
+  const btn = el("button", { class: "btn ghost small" }, "문서로 저장");
+  btn.onclick = async () => {
+    if (!area.value.trim()) return;
+    if (job.has_minutes && !confirm(`기존 ${docName(job)}을(를) 덮어씁니다. 계속할까요?`)) return;
+    btn.disabled = true;
+    try {
+      await api(`/api/jobs/${job.id}/document`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ markdown: area.value }),
+      });
+      S.data[job.id].minutes = null;
+      clearTimeout(S.pollTimer); poll(true); refreshJobs();
+    } catch (err) { alert("저장 실패: " + err.message); btn.disabled = false; }
+  };
+  return el("div", { class: "paste" },
+    el("div", { class: "hint" }, "에이전트가 이 작업을 직접 다루게 하려면 에이전트 연결 후 작업 id 를 알려주세요: ",
+      el("code", {}, job.id), " (폴더: ", el("code", {}, job.dir), ")"),
+    area, el("div", {}, btn));
+}
+
+async function deleteJob() {
+  const job = S.job;
+  if (!confirm(`「${job.filename}」 작업과 폴더(${job.dir})를 삭제합니다. 되돌릴 수 없습니다.`)) return;
+  try {
+    await api(`/api/jobs/${job.id}`, { method: "DELETE" });
+    clearTimeout(S.pollTimer); clearInterval(S.tickTimer);
+    delete S.data[job.id]; S.job = null; S.pendingId = null;
+    const jobs = await refreshJobs();
+    if (jobs.length) select(jobs[0].id);
+    else location.reload();
+  } catch (err) { alert("삭제 실패: " + err.message); }
+}
+
+// ---------- run an agent on this job ----------
+const AGENT_NAMES = { claude: "Claude Code", codex: "Codex" };
+const PRESET_TEXT = {
+  document: ["문서 작성", "이 작업의 녹취록으로 문서를 작성해서 저장해줘."],
+  speakers: ["화자 이름 확정", "녹취록에서 근거가 분명한 화자 이름만 찾아 확정하고, 근거가 약한 화자는 건드리지 마. 근거를 한 줄씩 알려줘."],
+  actions: ["결정·할 일만", "녹취록에서 결정사항과 할 일(담당자, 기한)만 뽑아 문서로 저장해줘. 없는 내용은 만들지 마."],
+};
+const agentDrafts = {};  // unsent text per job, kept across re-renders
+function agentTurn(t) {
+  const label = { running: "진행 중", done: "완료", error: "실패", cancelled: "중단됨" }[t.status] || t.status;
+  return [
+    el("div", { class: "chat-me" }, el("div", { class: "chat-bubble me" }, t.instruction)),
+    el("div", { class: "chat-ai" }, el("div", { class: "chat-bubble ai" },
+      el("div", { class: "row" }, el("b", {}, AGENT_NAMES[t.agent] || t.agent),
+        el("span", { class: `badge s-${t.status === "cancelled" ? "error" : t.status}` }, label)),
+      t.log?.length > 0 && el("details", { open: t.status === "running" }, el("summary", { class: "hint" }, `도구 ${t.log.length}회 호출`),
+        el("pre", { class: "code" }, t.log.join("\n"))),
+      t.status === "running" && !t.result && el("div", { class: "hint" }, "작업 중..."),
+      t.result && el("div", { style: "white-space:pre-wrap;font-size:13.5px" }, t.result),
+      t.error && el("div", { class: "error-box" }, t.error))),
+  ];
+}
+function agentView() {
+  const job = S.job, d = S.data[job.id], run = d.agent, running = job.agent_status === "running";
+  const wrap = el("div", { class: "minutes" });
+  const agents = S.cfg.agents;
+  wrap.append(el("p", { class: "hint", style: "margin-top:12px" },
+    "이 PC의 Claude Code·Codex 와 이 작업에 대해 이어서 대화합니다. 녹취록을 읽고 문서를 쓰거나 화자 이름을 정리하고, 결과를 보고 다시 고쳐 달라고 할 수 있습니다. ",
+    "쓸 수 있는 건 voicekit 도구뿐이고 (셸·파일·웹 없음), 이 작업 외의 녹음과 새 녹취 시작은 막혀 있습니다. 녹취록 텍스트는 해당 CLI 가 로그인된 서비스로 전송됩니다."));
+  if (!agents.length) {
+    wrap.append(el("div", { class: "notice err" }, "claude 또는 codex CLI 를 찾지 못했습니다. 설치하고 로그인한 뒤 서버를 다시 시작하세요."));
+    return wrap;
+  }
+  const turns = run && run.status !== "none" ? [...(run.history || []), run] : [];
+  const chat = el("div", { class: "chat" }, turns.length
+    ? turns.flatMap(agentTurn)
+    : el("div", { class: "hint" }, "아직 대화가 없습니다. 아래 예시를 누르거나 직접 시킬 일을 적어 보내세요."));
+  const sel = el("select", { disabled: running }, agents.map((a) => el("option", { value: a }, AGENT_NAMES[a] || a)));
+  if (run?.agent) sel.value = run.agent;
+  const text = el("textarea", { placeholder: turns.length ? "이어서 시킬 일 (Enter 전송, Shift+Enter 줄바꿈)" : "에이전트에게 시킬 일", disabled: running, style: "min-height:64px" });
+  text.value = agentDrafts[job.id] || "";
+  text.oninput = () => { agentDrafts[job.id] = text.value; };
+  const presets = !turns.length && el("div", { class: "prof-list" }, S.cfg.agent_presets.map((k) => el("button", {
+    type: "button", class: "chip", disabled: running, onclick: () => { text.value = agentDrafts[job.id] = PRESET_TEXT[k][1]; text.focus(); },
+  }, PRESET_TEXT[k][0])));
+  const go = el("button", { class: "btn", disabled: running }, running ? "작업 중..." : "보내기");
+  const send = async () => {
+    const msg = text.value.trim();
+    if (!msg || running) return;
+    if (!turns.length && job.has_minutes && /저장|작성|확정/.test(msg) &&
+        !confirm("에이전트가 기존 문서나 확정한 화자 이름을 덮어쓸 수 있습니다. 계속할까요?")) return;
+    go.disabled = true;
+    const fd = new FormData(); fd.append("agent", sel.value); fd.append("instruction", msg);
+    try {
+      await api(`/api/jobs/${job.id}/agent`, { method: "POST", body: fd });
+      agentDrafts[job.id] = "";
+      S.data[job.id].agent = null; clearTimeout(S.pollTimer); poll(true); refreshJobs();
+    } catch (err) { alert("실행 실패: " + err.message); go.disabled = false; }
+  };
+  go.onclick = send;
+  text.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
+  const stop = running && el("button", { class: "btn ghost danger", onclick: async () => {
+    try { await api(`/api/jobs/${job.id}/agent/cancel`, { method: "POST" }); } catch (err) { alert(err.message); }
+  } }, "중단");
+  const fresh = turns.length > 0 && !running && el("button", { class: "btn ghost small", onclick: async () => {
+    if (!confirm("이 작업의 에이전트 대화를 지우고 새로 시작할까요? (저장된 문서는 그대로입니다)")) return;
+    try {
+      await api(`/api/jobs/${job.id}/agent`, { method: "DELETE" });
+      S.data[job.id].agent = null; agentDrafts[job.id] = ""; refreshJobs(); renderView();
+    } catch (err) { alert(err.message); }
+  } }, "새 대화");
+  wrap.append(chat, presets, text, el("div", { class: "prof-row", style: "margin-top:8px" }, go, stop, sel, el("span", { style: "flex:1" }), fresh));
+  if (turns.length && !running && run.status === "done") wrap.append(el("div", { class: "hint" }, "문서와 화자 이름이 바뀌었다면 각 탭에 반영되어 있습니다."));
+  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  return wrap;
+}
+
+// ---------- remembered terms ----------
+const memDlg = $("#memory");
+let memScope = null;
+$("#mem-btn").onclick = () => {
+  memScope = S.job?.profile || S.cfg.default_profile;
+  $("#mem-off").hidden = S.cfg.memory_enabled !== false;
+  memDlg.showModal(); loadMemory();
+};
+async function loadMemory() {
+  $("#mem-scopes").replaceChildren(...[["common", "공통"], ...S.cfg.profiles.map((p) => [p.id, p.label])].map(([id, label]) =>
+    el("button", { type: "button", class: `chip${id === memScope ? " on-key" : ""}`, onclick: () => { memScope = id; loadMemory(); } }, label)));
+  const body = $("#mem-body");
+  let d;
+  try { d = await (await api(`/api/memory/${encodeURIComponent(memScope)}`)).json(); }
+  catch (err) { body.replaceChildren(el("div", { class: "error-box" }, err.message)); return; }
+  S.cfg.memory_min = d.min_count; $("#mem-min").textContent = d.min_count;
+  const call = async (method, url, fields) => {
+    const fd = new FormData(); for (const [k, v] of Object.entries(fields || {})) fd.append(k, v);
+    try { await api(url, { method, body: fd }); } catch (err) { alert(err.message); }
+    loadMemory();
+  };
+  body.replaceChildren(...(d.entries.length ? d.entries.map((e) => {
+    const url = `/api/memory/${encodeURIComponent(memScope)}/${e.id}`;
+    return el("div", { class: `agent${e.enabled ? "" : " mem-off"}` },
+      el("div", { class: "row" }, el("b", {}, e.right),
+        OKTAG(e.active && e.enabled, "사용 중", e.enabled ? `후보 ${e.count}/${d.min_count}` : "꺼짐"),
+        e.pinned && el("span", { class: "tag" }, "고정"),
+        el("span", { style: "flex:1" }),
+        el("button", { type: "button", class: "btn ghost small", onclick: () => call("PUT", url, { pinned: !e.pinned }) }, e.pinned ? "고정 해제" : "고정"),
+        el("button", { type: "button", class: "btn ghost small", onclick: () => call("PUT", url, { enabled: !e.enabled }) }, e.enabled ? "끄기" : "켜기"),
+        el("button", { type: "button", class: "btn ghost small danger", onclick: () => { if (confirm(`「${e.right}」를 지울까요?`)) call("DELETE", url); } }, "삭제")),
+      Object.keys(e.wrong || {}).length > 0 && el("div", { class: "prof-list", style: "margin:0" },
+        Object.entries(e.wrong).map(([w, n]) => el("span", { class: "tag", title: w.length < 2 && !e.pinned ? "한 글자 표기는 고정해야 자동으로 바꿉니다" : "" }, `${w} → ${e.right} ×${n}` + (w.length < 2 && !e.pinned ? " (힌트만)" : "")))));
+  }) : [el("div", { class: "hint", style: "margin-top:12px" }, "아직 기억한 용어가 없습니다. 대화 흐름에서 발화의 「수정」으로 고치거나 아래에서 직접 추가하세요.")]));
+}
+$("#mem-add").onclick = async () => {
+  const right = $("#mem-right").value.trim();
+  if (!right) return;
+  const fd = new FormData(); fd.append("right", right); fd.append("wrong", $("#mem-wrong").value);
+  try {
+    await api(`/api/memory/${encodeURIComponent(memScope)}`, { method: "POST", body: fd });
+    $("#mem-right").value = ""; $("#mem-wrong").value = "";
+  } catch (err) { alert(err.message); }
+  loadMemory();
+};
+$("#mem-right").onkeydown = $("#mem-wrong").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("#mem-add").click(); } };
+
+// ---------- agents ----------
+const agentsDlg = $("#agents");
+const OKTAG = (ok, yes, no) => el("span", { class: `tag ${ok ? "ok" : "no"}` }, (ok ? "✓ " : "") + (ok ? yes : no));
+$("#agent-btn").onclick = () => { agentsDlg.showModal(); loadAgents(); };
+async function loadAgents() {
+  const body = $("#agents-body");
+  body.replaceChildren(el("div", { class: "hint", style: "margin-top:12px" }, "상태 확인 중... (에이전트 CLI 응답을 기다립니다)"));
+  let d;
+  try { d = await (await api("/api/agents")).json(); }
+  catch (err) { body.replaceChildren(el("div", { class: "error-box" }, err.message)); return; }
+  const names = { claude: "Claude Code", codex: "Codex" };
+  const cards = d.agents.map((a) => {
+    const out = el("div", { class: "log-out" });
+    const btn = el("button", { class: "btn small", disabled: !a.installed }, a.mcp ? "다시 설치" : "연결하기");
+    btn.onclick = async () => {
+      const steps = d.steps[a.target].join("\n  ");
+      if (!confirm(`${names[a.target]} 의 사용자 전역 설정을 바꿉니다:\n  ${steps}\n\n계속할까요?`)) return;
+      btn.disabled = true; out.textContent = "설치 중...";
+      try {
+        const r = await (await api(`/api/agents/${a.target}/install`, { method: "POST" })).json();
+        out.textContent = r.output.join("\n") + (r.ok ? "\n완료. 에이전트를 새로 시작하면 voicekit 도구가 보입니다." : "\n실패");
+        loadAgentsSoon();
+      } catch (err) { out.textContent = "실패: " + err.message; btn.disabled = false; }
+    };
+    return el("div", { class: "agent" },
+      el("div", { class: "row" }, el("h3", {}, names[a.target]),
+        OKTAG(a.installed, "CLI 감지됨", "CLI 없음"), OKTAG(a.mcp, "MCP 등록됨", "MCP 미등록"),
+        OKTAG(a.guidance, `${a.guidance_label} 설치됨`, `${a.guidance_label} 없음`), el("span", { style: "flex:1" }), btn),
+      !a.installed && el("div", { class: "hint" }, `\`${a.target}\` 명령이 PATH 에 없습니다. 설치 후 다시 열어주세요. 아래 설정을 직접 붙여넣어도 됩니다.`),
+      out);
+  });
+  const cfg = JSON.stringify(d.mcp_config, null, 2);
+  const copy = el("button", { class: "btn ghost small" }, "설정 복사");
+  copy.onclick = async () => { await navigator.clipboard.writeText(cfg); copy.textContent = "복사됨"; setTimeout(() => { copy.textContent = "설정 복사"; }, 1500); };
+  body.replaceChildren(...cards,
+    el("div", { class: "agent" },
+      el("div", { class: "row" }, el("h3", {}, "그 밖의 MCP 에이전트"), el("span", { style: "flex:1" }), copy),
+      el("div", { class: "hint" }, "Cursor, Claude Desktop 등은 MCP 설정 파일에 아래를 넣으세요. 설치된 파이썬 환경 경로가 들어 있습니다."),
+      el("pre", { class: "code" }, cfg)),
+    el("div", { class: "hint", style: "margin-top:10px" }, "공유 작업 폴더: ", el("code", {}, d.home),
+      " (이 화면의 --out-dir). 연결 시 에이전트도 같은 폴더를 씁니다."));
+}
+let agentsReload;
+function loadAgentsSoon() { clearTimeout(agentsReload); agentsReload = setTimeout(() => { if (agentsDlg.open) loadAgents(); }, 2500); }
+
+// ---------- profiles ----------
+const profDlg = $("#profiles"), profiles = profDlg;
+let profCur = null;  // id being edited, or null for a new one
+$("#prof-btn").onclick = () => { renderProfileList(); profDlg.showModal(); if (!profCur) showProfile(S.cfg.default_profile); };
+function renderProfileList() {
+  $("#prof-dir").textContent = S.cfg.user_profile_dir;
+  const list = $("#prof-list");
+  list.replaceChildren(...S.cfg.profiles.map((p) => el("button", {
+    type: "button", class: `chip${p.id === profCur ? " on-key" : ""}`, onclick: () => showProfile(p.id),
+  }, p.label, p.source !== "builtin" && el("span", { class: "tag" }, p.source === "user" ? "내 파일" : p.source))),
+    el("button", { type: "button", class: "chip", onclick: () => showProfile(null) }, "+ 새 유형"));
+}
+async function showProfile(id) {
+  let p = { id: "", label: "", document: "", speakers: "", description: "", names_label: "", context_label: "", system: "", diarize: true, analysis: true, correct: true, source: "new" };
+  if (id) {
+    try { p = await (await api(`/api/profiles/${encodeURIComponent(id)}`)).json(); }
+    catch (err) { alert(err.message); return; }
+  }
+  profCur = id;
+  $("#pf-id").value = p.id; $("#pf-id").readOnly = !!id;
+  $("#pf-label").value = p.label; $("#pf-document").value = p.document; $("#pf-speakers").value = p.speakers || "";
+  $("#pf-description").value = p.description; $("#pf-names").value = p.names_label; $("#pf-context").value = p.context_label;
+  $("#pf-system").value = p.system;
+  for (const k of ["diarize", "analysis", "correct"]) $("#pf-" + k).checked = !!p[k];
+  $("#pf-delete").hidden = p.source !== "user";
+  $("#pf-save").textContent = p.source === "builtin" ? "저장 (내장본을 덮어씀)" : "저장";
+  renderProfileList();
+}
+$("#pf-copy").onclick = () => {
+  $("#pf-id").readOnly = false; $("#pf-id").value = ($("#pf-id").value + "-copy").slice(0, 32);
+  $("#pf-label").value = $("#pf-label").value + " (복사)"; profCur = null;
+  $("#pf-delete").hidden = true; $("#pf-save").textContent = "저장"; renderProfileList();
+};
+async function reloadProfiles(selectId) {
+  S.cfg = await (await api("/api/config")).json();
+  const prof = $("#profile"), keep = selectId || prof.value;
+  prof.replaceChildren(...S.cfg.profiles.map((p) => el("option", { value: p.id, selected: p.id === keep }, `${p.label} (${p.document})`)));
+  applyProfile(); renderProfileList();
+}
+$("#prof-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = {
+    id: $("#pf-id").value.trim(), label: $("#pf-label").value.trim(), document: $("#pf-document").value.trim(),
+    description: $("#pf-description").value.trim(), speakers: $("#pf-speakers").value.trim() || null,
+    names_label: $("#pf-names").value.trim(), context_label: $("#pf-context").value.trim(),
+    system: $("#pf-system").value, diarize: $("#pf-diarize").checked, analysis: $("#pf-analysis").checked,
+    correct: $("#pf-correct").checked,
+  };
+  try {
+    const saved = await (await api("/api/profiles", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    })).json();
+    await reloadProfiles(); await showProfile(saved.id);
+  } catch (err) { alert("저장 실패: " + err.message); }
+};
+$("#pf-delete").onclick = async () => {
+  if (!confirm(`사용자 프로필 「${profCur}」 파일을 삭제합니다.`)) return;
+  try {
+    await api(`/api/profiles/${encodeURIComponent(profCur)}`, { method: "DELETE" });
+    await reloadProfiles(); await showProfile(S.cfg.default_profile);
+  } catch (err) { alert("삭제 실패: " + err.message); }
+};
 
 // ---------- init ----------
 (async () => {
   S.cfg = await (await api("/api/config")).json();
+  const prof = $("#profile");
+  prof.replaceChildren(...S.cfg.profiles.map((p) => el("option", { value: p.id, selected: p.id === S.cfg.default_profile }, `${p.label} (${p.document})`)));
+  prof.onchange = applyProfile; applyProfile(); applyMode();
   $("#llm").replaceChildren(...S.cfg.llms.map((m) => el("option", { value: m, selected: m === S.cfg.default_llm }, m)));
   const jobs = await refreshJobs();
   if (jobs.length) select(jobs[0].id);
